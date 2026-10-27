@@ -1,9 +1,17 @@
 import Phaser from "phaser";
 import { Terreno, Recurso } from "../simulacion/mapa";
 import { crearMapaPrueba } from "../simulacion/mapaPrueba";
-import { Simulacion, MS_POR_TICK, TipoUnidad } from "../simulacion/simulacion";
+import {
+  Simulacion,
+  MS_POR_TICK,
+  TICKS_POR_PASO,
+  TipoUnidad,
+} from "../simulacion/simulacion";
 
 const TAM = 32; // tamaño de celda en pantalla (px)
+// Velocidad visual constante (px/s), ligada a la velocidad real de la simulación.
+// El 1.1 evita que el círculo se quede cada vez más rezagado.
+const VELOCIDAD_VISUAL = (TAM / (TICKS_POR_PASO * MS_POR_TICK)) * 1000 * 1.1;
 
 export class EscenaJuego extends Phaser.Scene {
   private teclas!: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -151,9 +159,37 @@ export class EscenaJuego extends Phaser.Scene {
             x: cx,
             y: cy,
           });
+          this.mostrarMarcador(cx, cy);
         }
       }
     });
+  }
+
+  // Marcador de destino: cuatro "píxeles" que se cierran hacia el centro
+  private mostrarMarcador(cx: number, cy: number): void {
+    const centroX = cx * TAM + TAM / 2;
+    const centroY = cy * TAM + TAM / 2;
+    const esquinas = [
+      [-1, -1],
+      [1, -1],
+      [1, 1],
+      [-1, 1],
+    ];
+    for (const [sx, sy] of esquinas) {
+      const r = this.add
+        .rectangle(centroX + sx * 12, centroY + sy * 12, 4, 4, 0xff3030)
+        .setDepth(5);
+      this.camUI.ignore(r); // la cámara de interfaz no dibuja el mundo
+      this.tweens.add({
+        targets: r,
+        x: centroX + sx * 4,
+        y: centroY + sy * 4,
+        alpha: 0,
+        duration: 350,
+        ease: "Quad.easeIn",
+        onComplete: () => r.destroy(),
+      });
+    }
   }
 
   update(_tiempo: number, delta: number): void {
@@ -172,20 +208,26 @@ export class EscenaJuego extends Phaser.Scene {
       this.acumulador -= MS_POR_TICK;
     }
 
-    // Dibujo: cada círculo se acerca suavemente a su celda
-    const suavizado = 1 - Math.pow(0.001, delta / 1000);
+    // Dibujo: cada círculo avanza a velocidad constante hacia su celda
     for (const u of this.sim.unidades) {
       const c = this.circulos.get(u.id);
       if (!c) continue;
       const objetivoX = u.x * TAM + TAM / 2;
       const objetivoY = u.y * TAM + TAM / 2;
-      c.x += (objetivoX - c.x) * suavizado;
-      c.y += (objetivoY - c.y) * suavizado;
-      // Borde amarillo si está seleccionada
-      c.setStrokeStyle(
-        2,
-        u.id === this.seleccionada ? 0xffe14d : 0xffffff
-      );
+      const dx = objetivoX - c.x;
+      const dy = objetivoY - c.y;
+      const dist = Math.hypot(dx, dy);
+      // Si se rezaga demasiado (por ejemplo tras una pausa), acelera para alcanzarla
+      const factor = Math.max(1, dist / (TAM * 1.5));
+      const maxPaso = (VELOCIDAD_VISUAL * factor * delta) / 1000;
+      if (dist <= maxPaso) {
+        c.x = objetivoX;
+        c.y = objetivoY;
+      } else {
+        c.x += (dx / dist) * maxPaso;
+        c.y += (dy / dist) * maxPaso;
+      }
+      c.setStrokeStyle(2, u.id === this.seleccionada ? 0xffe14d : 0xffffff);
     }
 
     this.textoTick.setText(`Tick: ${this.sim.tickActual}`);

@@ -4,7 +4,7 @@ import { buscarRuta, pasoValido } from "./rutas";
 
 export const TICKS_POR_SEGUNDO = 10;
 export const MS_POR_TICK = 1000 / TICKS_POR_SEGUNDO;
-const TICKS_POR_PASO = 3; // provisional: 1 celda cada 3 ticks
+export const TICKS_POR_PASO = 3; // provisional: 1 celda cada 3 ticks
 const TICKS_POR_PASO_DIAGONAL = 4; // la diagonal es ~1,4 veces más larga
 
 export interface OrdenMover {
