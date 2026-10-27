@@ -12,6 +12,7 @@ Voladora,50,10,5,0,1 (objetos no recursos),4 agua + 4 glucosa,Rapida y fragil. A
 Guerrera Voladora,150,25,50,0.5,2 (objetos no recursos),Guerrera + 3 agua + 8 glucosa,Evolucion de guerrera
 Gorgojo,5,0,0,2,0,Domado con 1 glucosa,Solo huye. Inmune a podredumbre. Cura
 Reina,1000,10,90 (cap; DEF original 200),0,0,200 agua + 300 glucosa,No se mueve. Produce todo excepto gorgojos
+Reina joven,100,50,0,0.1,0,50 agua + 50 glucosa,Se mueve rapido. Ataca. Vulnerable. Solo produce unidades cuando se planta en un palacio
 
 SECCION,GORGOJO - MODOS
 Modo,Requisito,Efecto
