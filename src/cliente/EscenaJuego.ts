@@ -1,18 +1,24 @@
 import Phaser from "phaser";
 import { Terreno, Recurso } from "../simulacion/mapa";
 import { crearMapaPrueba } from "../simulacion/mapaPrueba";
+import { Simulacion, MS_POR_TICK } from "../simulacion/simulacion";
 
 const TAM = 32; // tamaño de celda en pantalla (px)
 
 export class EscenaJuego extends Phaser.Scene {
   private teclas!: Phaser.Types.Input.Keyboard.CursorKeys;
+  private sim!: Simulacion;
+  private acumulador = 0;
+  private textoTick!: Phaser.GameObjects.Text;
+  private camUI!: Phaser.Cameras.Scene2D.Camera;
 
   constructor() {
     super("EscenaJuego");
   }
 
   create(): void {
-    const mapa = crearMapaPrueba();
+    this.sim = new Simulacion(crearMapaPrueba());
+    const mapa = this.sim.mapa;
     const g = this.add.graphics();
 
     for (let y = 0; y < mapa.alto; y++) {
@@ -63,6 +69,19 @@ export class EscenaJuego extends Phaser.Scene {
     }
 
     this.configurarCamara(mapa.ancho * TAM, mapa.alto * TAM);
+
+    // Interfaz: texto + cámara aparte que no hace zoom ni se desplaza
+    this.textoTick = this.add
+      .text(10, 10, "", { color: "#ffffff", fontSize: "16px" })
+      .setDepth(10);
+
+    this.camUI = this.cameras.add(0, 0, this.scale.width, this.scale.height);
+    this.cameras.main.ignore(this.textoTick); // el mundo no dibuja la interfaz
+    this.camUI.ignore(g); // la interfaz no dibuja el mapa
+
+    this.scale.on("resize", (size: Phaser.Structs.Size) => {
+      this.camUI.setSize(size.width, size.height);
+    });
   }
 
   private configurarCamara(anchoMundo: number, altoMundo: number): void {
@@ -89,11 +108,21 @@ export class EscenaJuego extends Phaser.Scene {
   }
 
   update(_tiempo: number, delta: number): void {
+    // Cámara
     const cam = this.cameras.main;
     const paso = (600 * delta) / 1000 / cam.zoom;
     if (this.teclas.left.isDown) cam.scrollX -= paso;
     if (this.teclas.right.isDown) cam.scrollX += paso;
     if (this.teclas.up.isDown) cam.scrollY -= paso;
     if (this.teclas.down.isDown) cam.scrollY += paso;
+
+       // Simulación: acumula tiempo y avanza en ticks fijos
+    this.acumulador += Math.min(delta, 250); // tope para no "espiralizar" tras una pausa
+    while (this.acumulador >= MS_POR_TICK) {
+      this.sim.tick();
+      this.acumulador -= MS_POR_TICK;
+    }
+
+    this.textoTick.setText(`Tick: ${this.sim.tickActual}`);
   }
 }
