@@ -82,4 +82,25 @@ export class Mapa {
     if (diferencia === 1) return this.esRampa(ax, ay) || this.esRampa(bx, by);
     return false;
   }
+
+    // ---- Escritura (para construir mapas) ----
+
+  setTerreno(x: number, y: number, valor: number): void {
+    if (this.dentro(x, y)) this.terreno[this.indice(x, y)] = valor;
+  }
+
+  setAltura(x: number, y: number, valor: number): void {
+    if (this.dentro(x, y)) this.altura[this.indice(x, y)] = valor;
+  }
+
+  setRampa(x: number, y: number, valor: boolean): void {
+    if (this.dentro(x, y)) this.rampa[this.indice(x, y)] = valor ? 1 : 0;
+  }
+
+  setRecurso(x: number, y: number, tipo: number, cantidad: number): void {
+    if (!this.dentro(x, y)) return;
+    const i = this.indice(x, y);
+    this.recurso[i] = tipo;
+    this.cantidad[i] = cantidad;
+  }
 }
