@@ -122,6 +122,10 @@ Adyacencia: los edificios ganan un pequeño porcentaje de defensa por cada edifi
 - Subterraneas (Coleopteros, futuro): viajan lentamente bajo tierra sin ser vistas, ellas no tienen visión hasta surgir a la superficie, en ese momento son vulnerabbles.
 - Las obreras recogen agua desde una celda adyacente, sin entrar a ella.
 
+### Terreno modificable
+- Celda ocupada (unidad o edificio): no se puede modificar.
+- Idea futura: edificios grandes (palacio de arcilla) tambien dan el efecto de terreno alto a voladoras sobre ellos. Se evalua al programar el combate.
+
 ### Decisiones tecnicas
 - Archivo: src/simulacion/mapa.ts, sin importar Phaser.
 - Primer mapa de prueba: 32x32 escrito a mano. Generacion aleatoria con semilla mas adelante.
