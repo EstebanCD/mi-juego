@@ -103,3 +103,30 @@ Arcilla: tiles cerca de flores (más) y en terrenos arcillosos (menos).
 Reina: DEF 90, el tope lo aplica la fórmula.
 Vista cenital con cuadrícula. La isométrica queda para el final.
 Adyacencia: los edificios ganan un pequeño porcentaje de defensa por cada edificio vecino con más defensa que ellos.
+
+
+## MAPA
+
+### Capas (una lista de valores por celda, posición = y * ancho + x)
+- Terreno: normal, agua, arcilloso
+- Altura: 0, 1, 2...
+- Rampa: si / no (unicos pasos entre alturas)
+- Recurso: ninguno, arcilla, flor, planta (con cantidad restante)
+- Unidades y edificios NO van en el mapa: son listas aparte
+
+### Reglas de movimiento
+- Terrestres: no pisan agua.
+- Entre celdas vecinas solo se pasa si tienen la misma altura, o si una es rampa y la diferencia es de 1.
+- Anfibias: unidades terrestres que evolucionan y pueden cruzar agua.
+- Voladoras: ignoran agua y alturas. Sobre terreno bajo (altura 0) son inmunes a ataques melee. Sobre terreno alto (altura 1 o mas) su ventaja desaparece y los melee las atacan como a una unidad terrestre. Alejarse a terreno bajo las protege.
+- Subterraneas (Coleopteros, futuro): viajan lentamente bajo tierra sin ser vistas, ellas no tienen visión hasta surgir a la superficie, en ese momento son vulnerabbles.
+- Las obreras recogen agua desde una celda adyacente, sin entrar a ella.
+
+### Decisiones tecnicas
+- Archivo: src/simulacion/mapa.ts, sin importar Phaser.
+- Primer mapa de prueba: 32x32 escrito a mano. Generacion aleatoria con semilla mas adelante.
+- Tamano de celda en pantalla: 32 px (ajustable).
+
+### Pendientes
+- Charcos: pisables (lentos) o infranqueables como los rios. Por ahora, infranqueables.
+- Definir exactamente cuando una voladora es vulnerable a melee (ver nota en NOTAS.md).
