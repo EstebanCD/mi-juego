@@ -1,10 +1,11 @@
 import { Mapa } from "./mapa";
 import { TipoUnidad, type Unidad } from "./unidad";
-import { buscarRuta } from "./rutas";
+import { buscarRuta, pasoValido } from "./rutas";
 
 export const TICKS_POR_SEGUNDO = 10;
 export const MS_POR_TICK = 1000 / TICKS_POR_SEGUNDO;
 const TICKS_POR_PASO = 3; // provisional: 1 celda cada 3 ticks
+const TICKS_POR_PASO_DIAGONAL = 4; // la diagonal es ~1,4 veces más larga
 
 export interface OrdenMover {
   tipo: "mover";
@@ -62,7 +63,7 @@ export class Simulacion {
     this.ordenes = [];
   }
 
-  private moverUnidades(): void {
+    private moverUnidades(): void {
     for (const u of this.unidades) {
       if (u.ruta.length === 0) continue;
       if (u.espera > 0) {
@@ -71,15 +72,16 @@ export class Simulacion {
       }
       const sig = u.ruta[0];
       // El terreno puede haber cambiado: si ya no se puede pasar, recalcula.
-      if (!this.mapa.puedePasar(u.x, u.y, sig.x, sig.y)) {
+      if (!pasoValido(this.mapa, u.x, u.y, sig.x, sig.y)) {
         const destino = u.ruta[u.ruta.length - 1];
         u.ruta = buscarRuta(this.mapa, u.x, u.y, destino.x, destino.y) ?? [];
         continue;
       }
+      const diagonal = sig.x !== u.x && sig.y !== u.y;
       u.x = sig.x;
       u.y = sig.y;
       u.ruta.shift();
-      u.espera = TICKS_POR_PASO - 1;
+      u.espera = (diagonal ? TICKS_POR_PASO_DIAGONAL : TICKS_POR_PASO) - 1;
     }
   }
 }

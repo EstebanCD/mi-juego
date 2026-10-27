@@ -11,6 +11,8 @@ export class EscenaJuego extends Phaser.Scene {
   private acumulador = 0;
   private textoTick!: Phaser.GameObjects.Text;
   private camUI!: Phaser.Cameras.Scene2D.Camera;
+  private circulos = new Map<number, Phaser.GameObjects.Arc>();
+  private seleccionada: number | null = null;
 
   constructor() {
     super("EscenaJuego");
@@ -85,7 +87,8 @@ export class EscenaJuego extends Phaser.Scene {
 
     // Una obrera de prueba en la celda (10, 12)
     this.sim.crearUnidad(TipoUnidad.Obrera, 10, 12);
-    this.dibujarUnidades();
+    this.crearCirculos();
+    this.configurarRaton();
   }
 
   private configurarCamara(anchoMundo: number, altoMundo: number): void {
@@ -111,8 +114,10 @@ export class EscenaJuego extends Phaser.Scene {
     this.teclas = this.input.keyboard!.createCursorKeys();
   }
 
-  private dibujarUnidades(): void {
+  // Crea un círculo por cada unidad que aún no tenga uno
+  private crearCirculos(): void {
     for (const u of this.sim.unidades) {
+      if (this.circulos.has(u.id)) continue;
       const c = this.add.circle(
         u.x * TAM + TAM / 2,
         u.y * TAM + TAM / 2,
@@ -121,7 +126,34 @@ export class EscenaJuego extends Phaser.Scene {
       );
       c.setStrokeStyle(2, 0xffffff);
       this.camUI.ignore(c); // la cámara de interfaz no dibuja el mundo
+      this.circulos.set(u.id, c);
     }
+  }
+
+  private configurarRaton(): void {
+    // Evita el menú contextual del navegador al hacer clic derecho
+    this.input.mouse?.disableContextMenu();
+
+    this.input.on("pointerdown", (p: Phaser.Input.Pointer) => {
+      const mundo = this.cameras.main.getWorldPoint(p.x, p.y);
+      const cx = Math.floor(mundo.x / TAM);
+      const cy = Math.floor(mundo.y / TAM);
+
+      if (p.leftButtonDown()) {
+        // Selecciona la unidad de esa celda, o deselecciona
+        const u = this.sim.unidades.find((v) => v.x === cx && v.y === cy);
+        this.seleccionada = u ? u.id : null;
+      } else if (p.rightButtonDown() && this.seleccionada !== null) {
+        if (this.sim.mapa.dentro(cx, cy)) {
+          this.sim.enviarOrden({
+            tipo: "mover",
+            unidadId: this.seleccionada,
+            x: cx,
+            y: cy,
+          });
+        }
+      }
+    });
   }
 
   update(_tiempo: number, delta: number): void {
@@ -138,6 +170,22 @@ export class EscenaJuego extends Phaser.Scene {
     while (this.acumulador >= MS_POR_TICK) {
       this.sim.tick();
       this.acumulador -= MS_POR_TICK;
+    }
+
+    // Dibujo: cada círculo se acerca suavemente a su celda
+    const suavizado = 1 - Math.pow(0.001, delta / 1000);
+    for (const u of this.sim.unidades) {
+      const c = this.circulos.get(u.id);
+      if (!c) continue;
+      const objetivoX = u.x * TAM + TAM / 2;
+      const objetivoY = u.y * TAM + TAM / 2;
+      c.x += (objetivoX - c.x) * suavizado;
+      c.y += (objetivoY - c.y) * suavizado;
+      // Borde amarillo si está seleccionada
+      c.setStrokeStyle(
+        2,
+        u.id === this.seleccionada ? 0xffe14d : 0xffffff
+      );
     }
 
     this.textoTick.setText(`Tick: ${this.sim.tickActual}`);
