@@ -1,7 +1,7 @@
 import Phaser from "phaser";
 import { Terreno, Recurso } from "../simulacion/mapa";
 import { crearMapaPrueba } from "../simulacion/mapaPrueba";
-import { Simulacion, MS_POR_TICK } from "../simulacion/simulacion";
+import { Simulacion, MS_POR_TICK, TipoUnidad } from "../simulacion/simulacion";
 
 const TAM = 32; // tamaño de celda en pantalla (px)
 
@@ -82,6 +82,10 @@ export class EscenaJuego extends Phaser.Scene {
     this.scale.on("resize", (size: Phaser.Structs.Size) => {
       this.camUI.setSize(size.width, size.height);
     });
+
+    // Una obrera de prueba en la celda (10, 12)
+    this.sim.crearUnidad(TipoUnidad.Obrera, 10, 12);
+    this.dibujarUnidades();
   }
 
   private configurarCamara(anchoMundo: number, altoMundo: number): void {
@@ -107,6 +111,19 @@ export class EscenaJuego extends Phaser.Scene {
     this.teclas = this.input.keyboard!.createCursorKeys();
   }
 
+  private dibujarUnidades(): void {
+    for (const u of this.sim.unidades) {
+      const c = this.add.circle(
+        u.x * TAM + TAM / 2,
+        u.y * TAM + TAM / 2,
+        9,
+        0xff6a3d
+      );
+      c.setStrokeStyle(2, 0xffffff);
+      this.camUI.ignore(c); // la cámara de interfaz no dibuja el mundo
+    }
+  }
+
   update(_tiempo: number, delta: number): void {
     // Cámara
     const cam = this.cameras.main;
@@ -116,7 +133,7 @@ export class EscenaJuego extends Phaser.Scene {
     if (this.teclas.up.isDown) cam.scrollY -= paso;
     if (this.teclas.down.isDown) cam.scrollY += paso;
 
-       // Simulación: acumula tiempo y avanza en ticks fijos
+    // Simulación: acumula tiempo y avanza en ticks fijos
     this.acumulador += Math.min(delta, 250); // tope para no "espiralizar" tras una pausa
     while (this.acumulador >= MS_POR_TICK) {
       this.sim.tick();
