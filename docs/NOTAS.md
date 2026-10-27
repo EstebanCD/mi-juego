@@ -1,0 +1,1 @@
+Pendientes: valores de adyacencia, X extracciones por flor, tiempos de podredumbre
