@@ -5,6 +5,8 @@ import { crearMapaPrueba } from "../simulacion/mapaPrueba";
 const TAM = 32; // tamaño de celda en pantalla (px)
 
 export class EscenaJuego extends Phaser.Scene {
+  private teclas!: Phaser.Types.Input.Keyboard.CursorKeys;
+
   constructor() {
     super("EscenaJuego");
   }
@@ -59,5 +61,39 @@ export class EscenaJuego extends Phaser.Scene {
         g.strokeRect(px, py, TAM, TAM);
       }
     }
+
+    this.configurarCamara(mapa.ancho * TAM, mapa.alto * TAM);
+  }
+
+  private configurarCamara(anchoMundo: number, altoMundo: number): void {
+    const cam = this.cameras.main;
+    cam.setBounds(0, 0, anchoMundo, altoMundo);
+
+    // Arrastrar con el botón central del ratón
+    this.input.on("pointermove", (p: Phaser.Input.Pointer) => {
+      if (!p.middleButtonDown()) return;
+      cam.scrollX -= (p.x - p.prevPosition.x) / cam.zoom;
+      cam.scrollY -= (p.y - p.prevPosition.y) / cam.zoom;
+    });
+
+    // Zoom con la rueda
+    this.input.on(
+      "wheel",
+      (_p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
+        const zoom = cam.zoom * (dy > 0 ? 0.9 : 1.1);
+        cam.setZoom(Phaser.Math.Clamp(zoom, 0.5, 3));
+      }
+    );
+
+    this.teclas = this.input.keyboard!.createCursorKeys();
+  }
+
+  update(_tiempo: number, delta: number): void {
+    const cam = this.cameras.main;
+    const paso = (600 * delta) / 1000 / cam.zoom;
+    if (this.teclas.left.isDown) cam.scrollX -= paso;
+    if (this.teclas.right.isDown) cam.scrollX += paso;
+    if (this.teclas.up.isDown) cam.scrollY -= paso;
+    if (this.teclas.down.isDown) cam.scrollY += paso;
   }
 }
