@@ -14,14 +14,32 @@ const TAM = 32; // tamaño de celda en pantalla (px)
 // El 1.1 evita que el círculo se quede cada vez más rezagado.
 const VELOCIDAD_VISUAL = (TAM / (TICKS_POR_PASO * MS_POR_TICK)) * 1000 * 1.1;
 
+// Nombres para mostrar en el panel (el índice es el valor numérico de la simulación)
+const NOMBRES_TERRENO = ["Normal", "Agua", "Arcilloso"];
+const NOMBRES_RECURSO = ["Ninguno", "Arcilla", "Flor", "Planta"];
+const NOMBRES_CARGA = ["Nada", "Agua", "Arcilla"];
+const NOMBRES_ESTADO = [
+  "Libre",
+  "Yendo al recurso",
+  "Recogiendo",
+  "Yendo al depósito",
+];
+const NOMBRES_EDIFICIO = ["Palacio de arcilla", "Madriguera"];
+
+const COLOR_CARGA_AGUA = 0x4aa8ff;
+const COLOR_CARGA_ARCILLA = 0xffd23f;
+
 export class EscenaJuego extends Phaser.Scene {
   private teclas!: Phaser.Types.Input.Keyboard.CursorKeys;
   private sim!: Simulacion;
   private acumulador = 0;
   private textoTick!: Phaser.GameObjects.Text;
+  private textoInfo!: Phaser.GameObjects.Text;
   private camUI!: Phaser.Cameras.Scene2D.Camera;
   private circulos = new Map<number, Phaser.GameObjects.Arc>();
+  private marcasCarga = new Map<number, Phaser.GameObjects.Rectangle>();
   private seleccionada: number | null = null;
+  private celdaInfo: { x: number; y: number } | null = null;
 
   constructor() {
     super("EscenaJuego");
@@ -81,17 +99,31 @@ export class EscenaJuego extends Phaser.Scene {
 
     this.configurarCamara(mapa.ancho * TAM, mapa.alto * TAM);
 
-    // Interfaz: texto + cámara aparte que no hace zoom ni se desplaza
+    // Interfaz: textos + cámara aparte que no hace zoom ni se desplaza
     this.textoTick = this.add
       .text(10, 10, "", { color: "#ffffff", fontSize: "16px" })
       .setDepth(10);
 
+    // Panel de información: arriba, centrado
+    this.textoInfo = this.add
+      .text(this.scale.width / 2, 10, "", {
+        color: "#ffffff",
+        fontSize: "15px",
+        backgroundColor: "#000000cc",
+        padding: { x: 10, y: 6 },
+        align: "center",
+      })
+      .setOrigin(0.5, 0)
+      .setDepth(10)
+      .setVisible(false);
+
     this.camUI = this.cameras.add(0, 0, this.scale.width, this.scale.height);
-    this.cameras.main.ignore(this.textoTick); // el mundo no dibuja la interfaz
+    this.cameras.main.ignore([this.textoTick, this.textoInfo]); // el mundo no dibuja la interfaz
     this.camUI.ignore(g); // la interfaz no dibuja el mapa
 
     this.scale.on("resize", (size: Phaser.Structs.Size) => {
       this.camUI.setSize(size.width, size.height);
+      this.textoInfo.setX(size.width / 2);
     });
 
     // Palacio inicial del jugador 0 (2x2) y una obrera de prueba
@@ -137,7 +169,7 @@ export class EscenaJuego extends Phaser.Scene {
     }
   }
 
-  // Crea un círculo por cada unidad que aún no tenga uno
+  // Crea un círculo (y su línea de carga) por cada unidad que aún no tenga uno
   private crearCirculos(): void {
     for (const u of this.sim.unidades) {
       if (this.circulos.has(u.id)) continue;
@@ -150,6 +182,14 @@ export class EscenaJuego extends Phaser.Scene {
       c.setStrokeStyle(2, 0xffffff);
       this.camUI.ignore(c); // la cámara de interfaz no dibuja el mundo
       this.circulos.set(u.id, c);
+
+      // Línea pequeña sobre la unidad: solo se ve si lleva carga
+      const marca = this.add
+        .rectangle(c.x, c.y - 15, 14, 3, COLOR_CARGA_AGUA)
+        .setDepth(4)
+        .setVisible(false);
+      this.camUI.ignore(marca);
+      this.marcasCarga.set(u.id, marca);
     }
   }
 
@@ -166,6 +206,8 @@ export class EscenaJuego extends Phaser.Scene {
         // Selecciona la unidad de esa celda, o deselecciona
         const u = this.sim.unidades.find((v) => v.x === cx && v.y === cy);
         this.seleccionada = u ? u.id : null;
+        // Guarda la celda para el panel de información
+        this.celdaInfo = this.sim.mapa.dentro(cx, cy) ? { x: cx, y: cy } : null;
       } else if (p.rightButtonDown() && this.seleccionada !== null) {
         if (this.sim.mapa.dentro(cx, cy)) {
           if (this.sim.esRecolectable(cx, cy)) {
@@ -216,6 +258,48 @@ export class EscenaJuego extends Phaser.Scene {
     }
   }
 
+  // Texto del panel: unidad seleccionada > edificio de la celda > celda
+  private textoPanel(): string | null {
+    // 1. Unidad seleccionada (se actualiza aunque se mueva)
+    if (this.seleccionada !== null) {
+      const u = this.sim.unidades.find((v) => v.id === this.seleccionada);
+      if (u) {
+        return (
+          `Obrera  |  Jugador ${u.jugador}\n` +
+          `HP: ${u.hp}  |  Carga: ${NOMBRES_CARGA[u.carga]}  |  Estado: ${NOMBRES_ESTADO[u.estado]}\n` +
+          `Celda: (${u.x}, ${u.y})`
+        );
+      }
+    }
+    if (!this.celdaInfo) return null;
+    const { x, y } = this.celdaInfo;
+    const mapa = this.sim.mapa;
+
+    // 2. Edificio en la celda
+    const e = this.sim.edificios.find(
+      (b) => x >= b.x && x < b.x + b.ancho && y >= b.y && y < b.y + b.alto
+    );
+    if (e) {
+      return (
+        `${NOMBRES_EDIFICIO[e.tipo]}  |  Jugador ${e.jugador}\n` +
+        `HP: ${e.hp}  |  Tamaño: ${e.ancho}x${e.alto}  |  Depósito: ${e.esDeposito ? "Sí" : "No"}\n` +
+        `Esquina: (${e.x}, ${e.y})`
+      );
+    }
+
+    // 3. Celda vacía
+    const r = mapa.getRecurso(x, y);
+    const recurso =
+      r === Recurso.Ninguno
+        ? "Ninguno"
+        : `${NOMBRES_RECURSO[r]} (${mapa.getCantidad(x, y)})`;
+    return (
+      `Celda (${x}, ${y})\n` +
+      `Terreno: ${NOMBRES_TERRENO[mapa.getTerreno(x, y)]}  |  Altura: ${mapa.getAltura(x, y)}  |  Rampa: ${mapa.esRampa(x, y) ? "Sí" : "No"}\n` +
+      `Recurso: ${recurso}`
+    );
+  }
+
   update(_tiempo: number, delta: number): void {
     // Cámara
     const cam = this.cameras.main;
@@ -251,21 +335,34 @@ export class EscenaJuego extends Phaser.Scene {
         c.x += (dx / dist) * maxPaso;
         c.y += (dy / dist) * maxPaso;
       }
-      // Borde: amarillo = seleccionada, azul = lleva agua, marrón = lleva arcilla
-      const colorBorde =
-        u.id === this.seleccionada
-          ? 0xffe14d
-          : u.carga === 1
-          ? 0x4aa8ff
-          : u.carga === 2
-          ? 0xb5835a
-          : 0xffffff;
-      c.setStrokeStyle(2, colorBorde);
+      // Borde: amarillo = seleccionada
+      c.setStrokeStyle(2, u.id === this.seleccionada ? 0xffe14d : 0xffffff);
+
+      // Línea de carga sobre la unidad: azul = agua, amarilla = arcilla
+      const marca = this.marcasCarga.get(u.id);
+      if (marca) {
+        if (u.carga === 0) {
+          marca.setVisible(false);
+        } else {
+          marca
+            .setFillStyle(u.carga === 1 ? COLOR_CARGA_AGUA : COLOR_CARGA_ARCILLA)
+            .setPosition(c.x, c.y - 15)
+            .setVisible(true);
+        }
+      }
     }
 
     const s = this.sim.stock[0];
     this.textoTick.setText(
       `Tick: ${this.sim.tickActual}\nAgua: ${s.agua}  Arcilla: ${s.arcilla}  Glucosa: ${s.glucosa}`
     );
+
+    // Panel de información (arriba, centrado)
+    const info = this.textoPanel();
+    if (info === null) {
+      this.textoInfo.setVisible(false);
+    } else {
+      this.textoInfo.setText(info).setVisible(true);
+    }
   }
 }
