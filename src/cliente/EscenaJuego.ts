@@ -7,6 +7,7 @@ import {
   TICKS_POR_PASO,
   TipoUnidad,
   TipoEdificio,
+  type EventoEntrega,
 } from "../simulacion/simulacion";
 
 const TAM = 32; // tamaño de celda en pantalla (px)
@@ -17,17 +18,22 @@ const VELOCIDAD_VISUAL = (TAM / (TICKS_POR_PASO * MS_POR_TICK)) * 1000 * 1.1;
 // Nombres para mostrar en el panel (el índice es el valor numérico de la simulación)
 const NOMBRES_TERRENO = ["Normal", "Agua", "Arcilloso"];
 const NOMBRES_RECURSO = ["Ninguno", "Arcilla", "Flor", "Planta"];
-const NOMBRES_CARGA = ["Nada", "Agua", "Arcilla"];
 const NOMBRES_ESTADO = [
   "Libre",
   "Yendo al recurso",
   "Recogiendo",
   "Yendo al depósito",
+  "Entregando",
 ];
 const NOMBRES_EDIFICIO = ["Palacio de arcilla", "Madriguera"];
 
 const COLOR_CARGA_AGUA = 0x4aa8ff;
 const COLOR_CARGA_ARCILLA = 0xffd23f;
+
+interface MarcasCarga {
+  agua: Phaser.GameObjects.Rectangle;
+  arcilla: Phaser.GameObjects.Rectangle;
+}
 
 export class EscenaJuego extends Phaser.Scene {
   private teclas!: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -37,7 +43,10 @@ export class EscenaJuego extends Phaser.Scene {
   private textoInfo!: Phaser.GameObjects.Text;
   private camUI!: Phaser.Cameras.Scene2D.Camera;
   private circulos = new Map<number, Phaser.GameObjects.Arc>();
-  private marcasCarga = new Map<number, Phaser.GameObjects.Rectangle>();
+  // Posición visual "base" de cada unidad (sigue a su celda) y un desvío
+  // temporal encima (por ejemplo, el acercamiento al entregar).
+  private bases = new Map<number, { x: number; y: number }>();
+  private marcasCarga = new Map<number, MarcasCarga>();
   private seleccionada: number | null = null;
   private celdaInfo: { x: number; y: number } | null = null;
 
@@ -169,27 +178,29 @@ export class EscenaJuego extends Phaser.Scene {
     }
   }
 
-  // Crea un círculo (y su línea de carga) por cada unidad que aún no tenga uno
+  // Crea un círculo (y sus líneas de carga) por cada unidad que aún no tenga uno
   private crearCirculos(): void {
     for (const u of this.sim.unidades) {
       if (this.circulos.has(u.id)) continue;
-      const c = this.add.circle(
-        u.x * TAM + TAM / 2,
-        u.y * TAM + TAM / 2,
-        9,
-        0xff6a3d
-      );
+      const bx = u.x * TAM + TAM / 2;
+      const by = u.y * TAM + TAM / 2;
+      const c = this.add.circle(bx, by, 9, 0xff6a3d);
       c.setStrokeStyle(2, 0xffffff);
       this.camUI.ignore(c); // la cámara de interfaz no dibuja el mundo
       this.circulos.set(u.id, c);
+      this.bases.set(u.id, { x: bx, y: by });
 
-      // Línea pequeña sobre la unidad: solo se ve si lleva carga
-      const marca = this.add
-        .rectangle(c.x, c.y - 15, 14, 3, COLOR_CARGA_AGUA)
+      // Líneas pequeñas sobre la unidad: solo se ven si lleva carga
+      const agua = this.add
+        .rectangle(bx, by - 15, 14, 3, COLOR_CARGA_AGUA)
         .setDepth(4)
         .setVisible(false);
-      this.camUI.ignore(marca);
-      this.marcasCarga.set(u.id, marca);
+      const arcilla = this.add
+        .rectangle(bx, by - 15, 14, 3, COLOR_CARGA_ARCILLA)
+        .setDepth(4)
+        .setVisible(false);
+      this.camUI.ignore([agua, arcilla]);
+      this.marcasCarga.set(u.id, { agua, arcilla });
     }
   }
 
@@ -258,15 +269,57 @@ export class EscenaJuego extends Phaser.Scene {
     }
   }
 
+   // Entrega: sale un "+1" por recurso entregado
+  private mostrarEntrega(ev: EventoEntrega): void {
+    const c = this.circulos.get(ev.unidadId);
+    if (!c) return;
+
+    // "+1" flotante: azul = agua, amarillo = arcilla
+    const colores: string[] = [];
+    if (ev.agua > 0) colores.push("#4aa8ff");
+    if (ev.arcilla > 0) colores.push("#ffd23f");
+    colores.forEach((color, i) => {
+      const t = this.add
+        .text(
+          c.x + (i - (colores.length - 1) / 2) * 26,
+          c.y - 22,
+          "+1",
+          {
+            fontFamily: "monospace",
+            fontSize: "16px",
+            fontStyle: "bold",
+            color,
+            stroke: "#000000",
+            strokeThickness: 3,
+          }
+        )
+        .setOrigin(0.5)
+        .setDepth(6);
+      this.camUI.ignore(t);
+      this.tweens.add({
+        targets: t,
+        y: t.y - 22,
+        alpha: 0,
+        duration: 800,
+        ease: "Quad.easeOut",
+        onComplete: () => t.destroy(),
+      });
+    });
+  }
+
   // Texto del panel: unidad seleccionada > edificio de la celda > celda
   private textoPanel(): string | null {
     // 1. Unidad seleccionada (se actualiza aunque se mueva)
     if (this.seleccionada !== null) {
       const u = this.sim.unidades.find((v) => v.id === this.seleccionada);
       if (u) {
+        const carga =
+          [u.cargaAgua > 0 ? "Agua" : "", u.cargaArcilla > 0 ? "Arcilla" : ""]
+            .filter((t) => t !== "")
+            .join(" + ") || "Nada";
         return (
           `Obrera  |  Jugador ${u.jugador}\n` +
-          `HP: ${u.hp}  |  Carga: ${NOMBRES_CARGA[u.carga]}  |  Estado: ${NOMBRES_ESTADO[u.estado]}\n` +
+          `HP: ${u.hp}  |  Carga: ${carga}  |  Estado: ${NOMBRES_ESTADO[u.estado]}\n` +
           `Celda: (${u.x}, ${u.y})`
         );
       }
@@ -316,39 +369,47 @@ export class EscenaJuego extends Phaser.Scene {
       this.acumulador -= MS_POR_TICK;
     }
 
-    // Dibujo: cada círculo avanza a velocidad constante hacia su celda
+    // Eventos de la simulación (entregas): se dibujan y se descartan
+    for (const ev of this.sim.eventos) this.mostrarEntrega(ev);
+    this.sim.eventos.length = 0;
+
+    // Dibujo: la base de cada unidad avanza a velocidad constante hacia su celda
     for (const u of this.sim.unidades) {
       const c = this.circulos.get(u.id);
-      if (!c) continue;
+      const base = this.bases.get(u.id);
+      if (!c || !base) continue;
       const objetivoX = u.x * TAM + TAM / 2;
       const objetivoY = u.y * TAM + TAM / 2;
-      const dx = objetivoX - c.x;
-      const dy = objetivoY - c.y;
+      const dx = objetivoX - base.x;
+      const dy = objetivoY - base.y;
       const dist = Math.hypot(dx, dy);
       // Si se rezaga demasiado (por ejemplo tras una pausa), acelera para alcanzarla
       const factor = Math.max(1, dist / (TAM * 1.5));
       const maxPaso = (VELOCIDAD_VISUAL * factor * delta) / 1000;
       if (dist <= maxPaso) {
-        c.x = objetivoX;
-        c.y = objetivoY;
+        base.x = objetivoX;
+        base.y = objetivoY;
       } else {
-        c.x += (dx / dist) * maxPaso;
-        c.y += (dy / dist) * maxPaso;
+        base.x += (dx / dist) * maxPaso;
+        base.y += (dy / dist) * maxPaso;
       }
+      c.setPosition(base.x, base.y);
+
       // Borde: amarillo = seleccionada
       c.setStrokeStyle(2, u.id === this.seleccionada ? 0xffe14d : 0xffffff);
 
-      // Línea de carga sobre la unidad: azul = agua, amarilla = arcilla
-      const marca = this.marcasCarga.get(u.id);
-      if (marca) {
-        if (u.carga === 0) {
-          marca.setVisible(false);
-        } else {
-          marca
-            .setFillStyle(u.carga === 1 ? COLOR_CARGA_AGUA : COLOR_CARGA_ARCILLA)
-            .setPosition(c.x, c.y - 15)
-            .setVisible(true);
-        }
+      // Líneas de carga sobre la unidad: azul = agua, amarilla = arcilla
+      const marcas = this.marcasCarga.get(u.id);
+      if (marcas) {
+        const lleva = u.cargaAgua > 0 && u.cargaArcilla > 0;
+        marcas.agua
+          .setVisible(u.cargaAgua > 0)
+          .setSize(lleva ? 8 : 14, 3)
+          .setPosition(lleva ? c.x - 5 : c.x, c.y - 15);
+        marcas.arcilla
+          .setVisible(u.cargaArcilla > 0)
+          .setSize(lleva ? 8 : 14, 3)
+          .setPosition(lleva ? c.x + 5 : c.x, c.y - 15);
       }
     }
 

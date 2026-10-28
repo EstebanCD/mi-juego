@@ -2,17 +2,12 @@ export const TipoUnidad = {
   Obrera: 0,
 } as const;
 
-export const Carga = {
-  Nada: 0,
-  Agua: 1,
-  Arcilla: 2,
-} as const;
-
 export const Estado = {
   Libre: 0,
   IrARecurso: 1,
   Recogiendo: 2,
   IrADeposito: 3,
+  Entregando: 4,
 } as const;
 
 export interface Unidad {
@@ -25,7 +20,8 @@ export interface Unidad {
   ruta: Array<{ x: number; y: number }>; // celdas pendientes
   espera: number; // ticks hasta el próximo paso
   estado: number; // Estado.*
-  carga: number; // Carga.*
+  cargaAgua: number; // 0 o 1
+  cargaArcilla: number; // 0 o 1
   recursoX: number; // celda del recurso asignado
   recursoY: number;
   temporizador: number; // ticks restantes de recogida

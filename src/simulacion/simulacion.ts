@@ -1,5 +1,5 @@
 import { Mapa, Terreno, Recurso } from "./mapa";
-import { TipoUnidad, Carga, Estado, type Unidad } from "./unidad";
+import { TipoUnidad, Estado, type Unidad } from "./unidad";
 import { TipoEdificio, DATOS_EDIFICIO, type Edificio } from "./edificio";
 import { buscarRuta, buscarRutaA, pasoValido } from "./rutas";
 
@@ -8,6 +8,7 @@ export const MS_POR_TICK = 1000 / TICKS_POR_SEGUNDO;
 export const TICKS_POR_PASO = 3; // provisional: 1 celda cada 3 ticks
 const TICKS_POR_PASO_DIAGONAL = 4; // la diagonal es ~1,4 veces más larga
 const TICKS_RECOGIDA = 10; // provisional: 1 segundo
+const TICKS_ENTREGA = 5; // 0,5 segundos
 
 export interface OrdenMover {
   tipo: "mover";
@@ -23,6 +24,15 @@ export interface OrdenRecolectar {
 }
 export type Orden = OrdenMover | OrdenRecolectar;
 
+// Avisos de la simulación para que el cliente los dibuje (no afectan al juego)
+export interface EventoEntrega {
+  tipo: "entrega";
+  unidadId: number;
+  edificioId: number;
+  agua: number;
+  arcilla: number;
+}
+
 export interface Stock {
   agua: number;
   arcilla: number;
@@ -33,6 +43,7 @@ export class Simulacion {
   readonly mapa: Mapa;
   readonly unidades: Unidad[] = [];
   readonly edificios: Edificio[] = [];
+  readonly eventos: EventoEntrega[] = [];
   // Un stock por jugador (0 y 1)
   readonly stock: Stock[] = [
     { agua: 0, arcilla: 0, glucosa: 0 },
@@ -57,7 +68,8 @@ export class Simulacion {
       ruta: [],
       espera: 0,
       estado: Estado.Libre,
-      carga: Carga.Nada,
+      cargaAgua: 0,
+      cargaArcilla: 0,
       recursoX: 0,
       recursoY: 0,
       temporizador: 0,
@@ -132,8 +144,12 @@ export class Simulacion {
         if (!this.esRecolectable(o.x, o.y)) continue;
         u.recursoX = o.x;
         u.recursoY = o.y;
-        // Si ya lleva carga, primero la entrega
-        if (u.carga !== Carga.Nada) this.irADeposito(u);
+        // Si ya lleva ese recurso, va a entregar. Si lleva el otro, va a por
+        // este sin soltarlo y entrega los dos juntos.
+        const llevaEste = this.mapa.esAgua(o.x, o.y)
+          ? u.cargaAgua > 0
+          : u.cargaArcilla > 0;
+        if (llevaEste) this.irADeposito(u);
         else this.irARecurso(u);
       }
     }
@@ -175,10 +191,12 @@ export class Simulacion {
     u.estado = Estado.IrARecurso;
   }
 
+  private depositosDe(jugador: number): Edificio[] {
+    return this.edificios.filter((e) => e.esDeposito && e.jugador === jugador);
+  }
+
   private irADeposito(u: Unidad): void {
-    const depositos = this.edificios.filter(
-      (e) => e.esDeposito && e.jugador === u.jugador
-    );
+    const depositos = this.depositosDe(u.jugador);
     if (depositos.length === 0) {
       u.estado = Estado.Libre;
       u.ruta = [];
@@ -207,7 +225,7 @@ export class Simulacion {
     );
   }
 
-  private actualizarRecoleccion(): void {
+    private actualizarRecoleccion(): void {
     for (const u of this.unidades) {
       if (u.estado === Estado.IrARecurso && u.ruta.length === 0) {
         if (!this.esRecolectable(u.recursoX, u.recursoY)) {
@@ -221,6 +239,11 @@ export class Simulacion {
         if (u.temporizador > 0) continue;
         this.recogerRecurso(u);
       } else if (u.estado === Estado.IrADeposito && u.ruta.length === 0) {
+        u.estado = Estado.Entregando;
+        u.temporizador = TICKS_ENTREGA;
+      } else if (u.estado === Estado.Entregando) {
+        u.temporizador--;
+        if (u.temporizador > 0) continue;
         this.entregar(u);
       }
     }
@@ -229,9 +252,9 @@ export class Simulacion {
   private recogerRecurso(u: Unidad): void {
     const { recursoX: rx, recursoY: ry } = u;
     if (this.mapa.esAgua(rx, ry)) {
-      u.carga = Carga.Agua;
+      u.cargaAgua = 1;
     } else if (this.esRecolectable(rx, ry)) {
-      u.carga = Carga.Arcilla;
+      u.cargaArcilla = 1;
       const restante = this.mapa.getCantidad(rx, ry) - 1;
       if (restante <= 0) this.mapa.setRecurso(rx, ry, Recurso.Ninguno, 0);
       else this.mapa.setRecurso(rx, ry, Recurso.Arcilla, restante);
@@ -243,10 +266,26 @@ export class Simulacion {
   }
 
   private entregar(u: Unidad): void {
+    // Debe estar pegada a un depósito; si no, busca otra ruta
+    const deposito = this.depositosDe(u.jugador).find((e) =>
+      this.adyacenteAEdificio(u.x, u.y, e)
+    );
+    if (!deposito) {
+      this.irADeposito(u);
+      return;
+    }
     const s = this.stock[u.jugador];
-    if (u.carga === Carga.Agua) s.agua++;
-    else if (u.carga === Carga.Arcilla) s.arcilla++;
-    u.carga = Carga.Nada;
+    s.agua += u.cargaAgua;
+    s.arcilla += u.cargaArcilla;
+    this.eventos.push({
+      tipo: "entrega",
+      unidadId: u.id,
+      edificioId: deposito.id,
+      agua: u.cargaAgua,
+      arcilla: u.cargaArcilla,
+    });
+    u.cargaAgua = 0;
+    u.cargaArcilla = 0;
     // Vuelve al mismo recurso si sigue disponible
     if (this.esRecolectable(u.recursoX, u.recursoY)) this.irARecurso(u);
     else u.estado = Estado.Libre;
