@@ -6,6 +6,7 @@ import {
   MS_POR_TICK,
   TICKS_POR_PASO,
   TipoUnidad,
+  TipoEdificio,
 } from "../simulacion/simulacion";
 
 const TAM = 32; // tamaño de celda en pantalla (px)
@@ -93,7 +94,9 @@ export class EscenaJuego extends Phaser.Scene {
       this.camUI.setSize(size.width, size.height);
     });
 
-    // Una obrera de prueba en la celda (10, 12)
+    // Palacio inicial del jugador 0 (2x2) y una obrera de prueba
+    this.sim.crearEdificio(TipoEdificio.Palacio, 0, 8, 14);
+    this.dibujarEdificios();
     this.sim.crearUnidad(TipoUnidad.Obrera, 10, 12);
     this.crearCirculos();
     this.configurarRaton();
@@ -120,6 +123,18 @@ export class EscenaJuego extends Phaser.Scene {
     );
 
     this.teclas = this.input.keyboard!.createCursorKeys();
+  }
+
+  // Un rectángulo por edificio (provisional hasta tener sprites)
+  private dibujarEdificios(): void {
+    for (const e of this.sim.edificios) {
+      const color = e.tipo === TipoEdificio.Palacio ? 0x8a5a3c : 0x6b4a33;
+      const r = this.add
+        .rectangle(e.x * TAM, e.y * TAM, e.ancho * TAM, e.alto * TAM, color)
+        .setOrigin(0, 0)
+        .setStrokeStyle(2, 0xd9b38c);
+      this.camUI.ignore(r); // la cámara de interfaz no dibuja el mundo
+    }
   }
 
   // Crea un círculo por cada unidad que aún no tenga uno
@@ -230,6 +245,9 @@ export class EscenaJuego extends Phaser.Scene {
       c.setStrokeStyle(2, u.id === this.seleccionada ? 0xffe14d : 0xffffff);
     }
 
-    this.textoTick.setText(`Tick: ${this.sim.tickActual}`);
+    const s = this.sim.stock[0];
+    this.textoTick.setText(
+      `Tick: ${this.sim.tickActual}\nAgua: ${s.agua}  Arcilla: ${s.arcilla}  Glucosa: ${s.glucosa}`
+    );
   }
 }

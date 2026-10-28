@@ -97,12 +97,11 @@ Daño final,Daño = max(1, ATK x (1 - DEF_efectiva/100))
 
 
 Decisiones:
-Victoria: matar a la reina o dejarla sin súbditos.
-Reina joven: se mueve, pero solo produce cuando se “planta” en un palacio. Para criar una reina nueva hace falta un segundo palacio.
-Arcilla: tiles cerca de flores (más) y en terrenos arcillosos (menos).
-Reina: DEF 90, el tope lo aplica la fórmula.
-Vista cenital con cuadrícula. La isométrica queda para el final.
-Adyacencia: los edificios ganan un pequeño porcentaje de defensa por cada edificio vecino con más defensa que ellos.
+## VICTORIA
+- Pierdes cuando mueren todas tus reinas, aunque queden otras unidades.
+- Mientras sobreviva una reina, sigues en partida y puedes remontar: ella produce unidades y puede criar una reina joven.
+- El rival siempre gana al matar a tu ultima reina.
+- Pendiente: si un gusano o una reina joven cuentan como "reina viva" cuando muere la ultima reina madre.
 
 
 ## MAPA

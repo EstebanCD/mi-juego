@@ -5,6 +5,7 @@ export const TipoUnidad = {
 export interface Unidad {
   id: number;
   tipo: number;
+  jugador: number;
   x: number; // celda
   y: number; // celda
   hp: number;

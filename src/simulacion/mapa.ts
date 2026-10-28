@@ -20,9 +20,10 @@ export class Mapa {
   // Una lista por capa, un valor por celda.
   private terreno: Uint8Array;
   private altura: Uint8Array;
-  private rampa: Uint8Array;      // 0 = no, 1 = sí
+  private rampa: Uint8Array; // 0 = no, 1 = sí
   private recurso: Uint8Array;
-  private cantidad: Uint16Array;  // recurso restante en la celda
+  private cantidad: Uint16Array; // recurso restante en la celda
+  private bloqueo: Uint8Array; // 1 = celda ocupada por un edificio
 
   constructor(ancho: number, alto: number) {
     this.ancho = ancho;
@@ -33,6 +34,7 @@ export class Mapa {
     this.rampa = new Uint8Array(total);
     this.recurso = new Uint8Array(total);
     this.cantidad = new Uint16Array(total);
+    this.bloqueo = new Uint8Array(total);
   }
 
   // ¿La celda (x, y) existe dentro del mapa?
@@ -45,7 +47,7 @@ export class Mapa {
     return y * this.ancho + x;
   }
 
-    // ---- Consultas básicas ----
+  // ---- Consultas básicas ----
 
   getTerreno(x: number, y: number): number {
     return this.terreno[this.indice(x, y)];
@@ -71,11 +73,16 @@ export class Mapa {
     return this.getTerreno(x, y) === Terreno.Agua;
   }
 
+  estaBloqueada(x: number, y: number): boolean {
+    return this.bloqueo[this.indice(x, y)] === 1;
+  }
+
   // ---- Regla de movimiento terrestre ----
   // ¿Puede una unidad terrestre pasar de la celda A a la celda B vecina?
   puedePasar(ax: number, ay: number, bx: number, by: number): boolean {
     if (!this.dentro(ax, ay) || !this.dentro(bx, by)) return false;
     if (this.esAgua(bx, by)) return false;
+    if (this.estaBloqueada(bx, by)) return false;
 
     const diferencia = Math.abs(this.getAltura(ax, ay) - this.getAltura(bx, by));
     if (diferencia === 0) return true;
@@ -83,7 +90,7 @@ export class Mapa {
     return false;
   }
 
-    // ---- Escritura (para construir mapas) ----
+  // ---- Escritura (para construir mapas) ----
 
   setTerreno(x: number, y: number, valor: number): void {
     if (this.dentro(x, y)) this.terreno[this.indice(x, y)] = valor;
@@ -102,5 +109,9 @@ export class Mapa {
     const i = this.indice(x, y);
     this.recurso[i] = tipo;
     this.cantidad[i] = cantidad;
+  }
+
+  setBloqueada(x: number, y: number, valor: boolean): void {
+    if (this.dentro(x, y)) this.bloqueo[this.indice(x, y)] = valor ? 1 : 0;
   }
 }
