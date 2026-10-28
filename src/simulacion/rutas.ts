@@ -146,3 +146,50 @@ export function buscarRuta(
   }
   return ruta;
 }
+
+// BFS hacia la celda más cercana que cumpla `esMeta`. Devuelve la ruta
+// (sin incluir el origen) o null. Si el origen ya es meta, devuelve [].
+export function buscarRutaA(
+  mapa: Mapa,
+  ox: number,
+  oy: number,
+  esMeta: (x: number, y: number) => boolean
+): Celda[] | null {
+  if (esMeta(ox, oy)) return [];
+  const ancho = mapa.ancho;
+  const inicio = oy * ancho + ox;
+  const previo = new Int32Array(ancho * mapa.alto).fill(-1);
+  const visitado = new Uint8Array(ancho * mapa.alto);
+  const cola: number[] = [inicio];
+  visitado[inicio] = 1;
+
+  for (let i = 0; i < cola.length; i++) {
+    const actual = cola[i];
+    const ax = actual % ancho;
+    const ay = (actual - ax) / ancho;
+
+    for (const [vx, vy] of VECINOS) {
+      const nx = ax + vx;
+      const ny = ay + vy;
+      if (!mapa.dentro(nx, ny)) continue;
+      if (!pasoValido(mapa, ax, ay, nx, ny)) continue;
+      const idx = ny * ancho + nx;
+      if (visitado[idx]) continue;
+      visitado[idx] = 1;
+      previo[idx] = actual;
+
+      if (esMeta(nx, ny)) {
+        const ruta: Celda[] = [];
+        let c = idx;
+        while (c !== inicio) {
+          const cx = c % ancho;
+          ruta.push({ x: cx, y: (c - cx) / ancho });
+          c = previo[c];
+        }
+        return ruta.reverse();
+      }
+      cola.push(idx);
+    }
+  }
+  return null;
+}

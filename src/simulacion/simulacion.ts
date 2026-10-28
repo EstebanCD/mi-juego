@@ -1,12 +1,13 @@
-import { Mapa } from "./mapa";
-import { TipoUnidad, type Unidad } from "./unidad";
+import { Mapa, Terreno, Recurso } from "./mapa";
+import { TipoUnidad, Carga, Estado, type Unidad } from "./unidad";
 import { TipoEdificio, DATOS_EDIFICIO, type Edificio } from "./edificio";
-import { buscarRuta, pasoValido } from "./rutas";
+import { buscarRuta, buscarRutaA, pasoValido } from "./rutas";
 
 export const TICKS_POR_SEGUNDO = 10;
 export const MS_POR_TICK = 1000 / TICKS_POR_SEGUNDO;
 export const TICKS_POR_PASO = 3; // provisional: 1 celda cada 3 ticks
 const TICKS_POR_PASO_DIAGONAL = 4; // la diagonal es ~1,4 veces más larga
+const TICKS_RECOGIDA = 10; // provisional: 1 segundo
 
 export interface OrdenMover {
   tipo: "mover";
@@ -14,7 +15,13 @@ export interface OrdenMover {
   x: number;
   y: number;
 }
-export type Orden = OrdenMover;
+export interface OrdenRecolectar {
+  tipo: "recolectar";
+  unidadId: number;
+  x: number; // celda de agua o arcilla
+  y: number;
+}
+export type Orden = OrdenMover | OrdenRecolectar;
 
 export interface Stock {
   agua: number;
@@ -49,6 +56,11 @@ export class Simulacion {
       hp: 20,
       ruta: [],
       espera: 0,
+      estado: Estado.Libre,
+      carga: Carga.Nada,
+      recursoX: 0,
+      recursoY: 0,
+      temporizador: 0,
     };
     this.unidades.push(u);
     return u;
@@ -101,19 +113,146 @@ export class Simulacion {
   tick(): void {
     this.tickActual++;
     this.aplicarOrdenes();
+    this.actualizarRecoleccion();
     this.moverUnidades();
   }
+
+  // ---- Órdenes ----
 
   private aplicarOrdenes(): void {
     for (const o of this.ordenes) {
       const u = this.unidades.find((v) => v.id === o.unidadId);
       if (!u) continue;
-      const ruta = buscarRuta(this.mapa, u.x, u.y, o.x, o.y);
-      u.ruta = ruta ?? [];
-      u.espera = 0;
+      if (o.tipo === "mover") {
+        const ruta = buscarRuta(this.mapa, u.x, u.y, o.x, o.y);
+        u.ruta = ruta ?? [];
+        u.espera = 0;
+        u.estado = Estado.Libre;
+      } else if (o.tipo === "recolectar") {
+        if (!this.esRecolectable(o.x, o.y)) continue;
+        u.recursoX = o.x;
+        u.recursoY = o.y;
+        // Si ya lleva carga, primero la entrega
+        if (u.carga !== Carga.Nada) this.irADeposito(u);
+        else this.irARecurso(u);
+      }
     }
     this.ordenes = [];
   }
+
+  esRecolectable(x: number, y: number): boolean {
+    if (!this.mapa.dentro(x, y)) return false;
+    if (this.mapa.esAgua(x, y)) return true;
+    return (
+      this.mapa.getRecurso(x, y) === Recurso.Arcilla &&
+      this.mapa.getCantidad(x, y) > 0
+    );
+  }
+
+  // ---- Ciclo de recolección ----
+
+  private esAdyacente(x: number, y: number, rx: number, ry: number): boolean {
+    return Math.max(Math.abs(x - rx), Math.abs(y - ry)) === 1;
+  }
+
+  private irARecurso(u: Unidad): void {
+    // Celda transitable al lado del recurso (el agua o la arcilla no se pisan)
+    const ruta = buscarRutaA(
+      this.mapa,
+      u.x,
+      u.y,
+      (x, y) =>
+        this.esAdyacente(x, y, u.recursoX, u.recursoY) &&
+        !this.mapa.esAgua(x, y)
+    );
+    if (ruta === null) {
+      u.estado = Estado.Libre;
+      u.ruta = [];
+      return;
+    }
+    u.ruta = ruta;
+    u.espera = 0;
+    u.estado = Estado.IrARecurso;
+  }
+
+  private irADeposito(u: Unidad): void {
+    const depositos = this.edificios.filter(
+      (e) => e.esDeposito && e.jugador === u.jugador
+    );
+    if (depositos.length === 0) {
+      u.estado = Estado.Libre;
+      u.ruta = [];
+      return;
+    }
+    const ruta = buscarRutaA(this.mapa, u.x, u.y, (x, y) =>
+      depositos.some((e) => this.adyacenteAEdificio(x, y, e))
+    );
+    if (ruta === null) {
+      u.estado = Estado.Libre;
+      u.ruta = [];
+      return;
+    }
+    u.ruta = ruta;
+    u.espera = 0;
+    u.estado = Estado.IrADeposito;
+  }
+
+  private adyacenteAEdificio(x: number, y: number, e: Edificio): boolean {
+    return (
+      x >= e.x - 1 &&
+      x <= e.x + e.ancho &&
+      y >= e.y - 1 &&
+      y <= e.y + e.alto &&
+      !(x >= e.x && x < e.x + e.ancho && y >= e.y && y < e.y + e.alto)
+    );
+  }
+
+  private actualizarRecoleccion(): void {
+    for (const u of this.unidades) {
+      if (u.estado === Estado.IrARecurso && u.ruta.length === 0) {
+        if (!this.esRecolectable(u.recursoX, u.recursoY)) {
+          u.estado = Estado.Libre; // la arcilla se agotó
+        } else {
+          u.estado = Estado.Recogiendo;
+          u.temporizador = TICKS_RECOGIDA;
+        }
+      } else if (u.estado === Estado.Recogiendo) {
+        u.temporizador--;
+        if (u.temporizador > 0) continue;
+        this.recogerRecurso(u);
+      } else if (u.estado === Estado.IrADeposito && u.ruta.length === 0) {
+        this.entregar(u);
+      }
+    }
+  }
+
+  private recogerRecurso(u: Unidad): void {
+    const { recursoX: rx, recursoY: ry } = u;
+    if (this.mapa.esAgua(rx, ry)) {
+      u.carga = Carga.Agua;
+    } else if (this.esRecolectable(rx, ry)) {
+      u.carga = Carga.Arcilla;
+      const restante = this.mapa.getCantidad(rx, ry) - 1;
+      if (restante <= 0) this.mapa.setRecurso(rx, ry, Recurso.Ninguno, 0);
+      else this.mapa.setRecurso(rx, ry, Recurso.Arcilla, restante);
+    } else {
+      u.estado = Estado.Libre; // se agotó mientras recogía
+      return;
+    }
+    this.irADeposito(u);
+  }
+
+  private entregar(u: Unidad): void {
+    const s = this.stock[u.jugador];
+    if (u.carga === Carga.Agua) s.agua++;
+    else if (u.carga === Carga.Arcilla) s.arcilla++;
+    u.carga = Carga.Nada;
+    // Vuelve al mismo recurso si sigue disponible
+    if (this.esRecolectable(u.recursoX, u.recursoY)) this.irARecurso(u);
+    else u.estado = Estado.Libre;
+  }
+
+  // ---- Movimiento ----
 
   private moverUnidades(): void {
     for (const u of this.unidades) {
@@ -138,4 +277,4 @@ export class Simulacion {
   }
 }
 
-export { TipoUnidad, TipoEdificio };
+export { TipoUnidad, TipoEdificio, Terreno };

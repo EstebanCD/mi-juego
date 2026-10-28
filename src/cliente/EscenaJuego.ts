@@ -168,12 +168,21 @@ export class EscenaJuego extends Phaser.Scene {
         this.seleccionada = u ? u.id : null;
       } else if (p.rightButtonDown() && this.seleccionada !== null) {
         if (this.sim.mapa.dentro(cx, cy)) {
-          this.sim.enviarOrden({
-            tipo: "mover",
-            unidadId: this.seleccionada,
-            x: cx,
-            y: cy,
-          });
+          if (this.sim.esRecolectable(cx, cy)) {
+            this.sim.enviarOrden({
+              tipo: "recolectar",
+              unidadId: this.seleccionada,
+              x: cx,
+              y: cy,
+            });
+          } else {
+            this.sim.enviarOrden({
+              tipo: "mover",
+              unidadId: this.seleccionada,
+              x: cx,
+              y: cy,
+            });
+          }
           this.mostrarMarcador(cx, cy);
         }
       }
@@ -242,7 +251,16 @@ export class EscenaJuego extends Phaser.Scene {
         c.x += (dx / dist) * maxPaso;
         c.y += (dy / dist) * maxPaso;
       }
-      c.setStrokeStyle(2, u.id === this.seleccionada ? 0xffe14d : 0xffffff);
+      // Borde: amarillo = seleccionada, azul = lleva agua, marrón = lleva arcilla
+      const colorBorde =
+        u.id === this.seleccionada
+          ? 0xffe14d
+          : u.carga === 1
+          ? 0x4aa8ff
+          : u.carga === 2
+          ? 0xb5835a
+          : 0xffffff;
+      c.setStrokeStyle(2, colorBorde);
     }
 
     const s = this.sim.stock[0];
