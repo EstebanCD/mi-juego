@@ -4,6 +4,8 @@ export const Terreno = {
   Normal: 0,
   Agua: 1,
   Arcilloso: 2,
+  Arena: 3,
+  Rocoso: 4,
 } as const;
 
 export const Recurso = {
@@ -11,11 +13,14 @@ export const Recurso = {
   Arcilla: 1,
   Flor: 2,
   Planta: 3,
+  Hongo: 4,
+  Cristal: 5,
 } as const;
 
 export class Mapa {
   readonly ancho: number;
   readonly alto: number;
+  readonly celdasRecursoModificadas = new Set<number>();
 
   // Una lista por capa, un valor por celda.
   private terreno: Uint8Array;
@@ -107,8 +112,12 @@ export class Mapa {
   setRecurso(x: number, y: number, tipo: number, cantidad: number): void {
     if (!this.dentro(x, y)) return;
     const i = this.indice(x, y);
+    const anteriorTipo = this.recurso[i];
+    const anteriorCantidad = this.cantidad[i];
+    const cambio = anteriorTipo !== tipo || anteriorCantidad !== cantidad;
     this.recurso[i] = tipo;
     this.cantidad[i] = cantidad;
+    if (cambio) this.celdasRecursoModificadas.add(i);
   }
 
   setBloqueada(x: number, y: number, valor: boolean): void {

@@ -1,39 +1,85 @@
 import { Mapa, Terreno, Recurso } from "./mapa";
+import { buscarRuta } from "./rutas";
 
 export function crearMapaPrueba(): Mapa {
-  const mapa = new Mapa(32, 32);
+  const mapa = new Mapa(160, 160);
 
-  // Un río vertical en la columna 16 (con un hueco de 2 celdas: un vado
-  // no existe todavía, así que lo dejamos como paso para probar rutas)
-  for (let y = 0; y < 32; y++) {
-    if (y !== 15 && y !== 16) mapa.setTerreno(16, y, Terreno.Agua);
-  }
-
-  // Un charco
-  for (let y = 5; y < 8; y++) {
-    for (let x = 6; x < 9; x++) mapa.setTerreno(x, y, Terreno.Agua);
-  }
-
-  // Una meseta de altura 1 en la esquina superior derecha
-  for (let y = 2; y < 9; y++) {
-    for (let x = 22; x < 29; x++) mapa.setAltura(x, y, 1);
-  }
-  // Rampa para subir a la meseta
-  mapa.setRampa(21, 5, true);
-  mapa.setAltura(21, 5, 0);
-
-  // Terreno arcilloso con arcilla
-  for (let y = 22; y < 27; y++) {
-    for (let x = 4; x < 10; x++) {
-      mapa.setTerreno(x, y, Terreno.Arcilloso);
-      mapa.setRecurso(x, y, Recurso.Arcilla, 50);
+  // Un río vertical serpenteante en las columnas centrales
+  for (let y = 0; y < 160; y++) {
+    const col = 80 + Math.floor(Math.sin(y * 0.05) * 15);
+    for (let c = 0; c < 3; c++) {
+      if (y !== 78 && y !== 79 && y !== 80) {
+        mapa.setTerreno(col + c, y, Terreno.Agua);
+      }
     }
   }
 
-  // Flores
-  mapa.setRecurso(12, 10, Recurso.Flor, 20);
-  mapa.setRecurso(20, 24, Recurso.Flor, 20);
-  mapa.setRecurso(25, 14, Recurso.Flor, 20);
+  // Charcos dispersos
+  for (let cy = 20; cy < 140; cy += 40) {
+    for (let y = cy; y < cy + 5; y++) {
+      for (let x = 20; x < 26; x++) mapa.setTerreno(x, y, Terreno.Agua);
+      for (let x = 130; x < 136; x++) mapa.setTerreno(x, y, Terreno.Agua);
+    }
+  }
+
+  // Mesetas y elevaciones montañosas con rampas
+  for (let y = 10; y < 40; y++) {
+    for (let x = 110; x < 145; x++) {
+      mapa.setAltura(x, y, 1);
+      if (x === 110 && y === 25) {
+        mapa.setRampa(x, y, true);
+        mapa.setAltura(x, y, 0);
+      }
+    }
+  }
+
+  for (let y = 120; y < 150; y++) {
+    for (let x = 15; x < 50; x++) {
+      mapa.setAltura(x, y, 2);
+    }
+  }
+
+  // Escalón intermedio de altura 1 para llegar al segundo plateau desde tierra.
+  for (let y = 133; y <= 137; y++) {
+    for (let x = 50; x <= 51; x++) {
+      mapa.setAltura(x, y, 1);
+      mapa.setRampa(x, y, true);
+    }
+  }
+  mapa.setRampa(50, 135, true);
+  mapa.setRampa(49, 135, true);
+
+  // Terrenos arcillosos, arenosos y rocosos con recursos ricos
+  for (let y = 0; y < 160; y += 15) {
+    for (let x = 0; x < 160; x += 20) {
+      const tipoT = (x + y) % 4;
+      for (let dy = 0; dy < 6; dy++) {
+        for (let dx = 0; dx < 6; dx++) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (mapa.dentro(nx, ny) && !mapa.esAgua(nx, ny)) {
+            if (tipoT === 0) {
+              mapa.setTerreno(nx, ny, Terreno.Arcilloso);
+              mapa.setRecurso(nx, ny, Recurso.Arcilla, 80);
+            } else if (tipoT === 1) {
+              mapa.setTerreno(nx, ny, Terreno.Arena);
+              mapa.setRecurso(nx, ny, Recurso.Hongo, 50);
+            } else if (tipoT === 2) {
+              mapa.setTerreno(nx, ny, Terreno.Rocoso);
+              mapa.setRecurso(nx, ny, Recurso.Cristal, 40);
+            } else {
+              mapa.setRecurso(nx, ny, Recurso.Flor, 50);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const ruta = buscarRuta(mapa, 60, 135, 30, 135);
+  console.log(
+    `[mapaPrueba] ruta (60,135) -> (30,135): ${ruta ? "existe" : "no existe"}`
+  );
 
   return mapa;
 }

@@ -1,5 +1,6 @@
 import Phaser from "phaser";
 import { EscenaJuego } from "./cliente/EscenaJuego";
+import "./style.css";
 
 new Phaser.Game({
   type: Phaser.AUTO,

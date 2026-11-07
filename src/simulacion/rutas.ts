@@ -78,7 +78,8 @@ function bfs(
   ox: number,
   oy: number,
   dx: number,
-  dy: number
+  dy: number,
+  maxNodos = 6000
 ): Celda[] | null {
   const ancho = mapa.ancho;
   const inicio = oy * ancho + ox;
@@ -88,6 +89,7 @@ function bfs(
   visitado[inicio] = 1;
 
   for (let i = 0; i < cola.length; i++) {
+    if (cola.length >= maxNodos) return null;
     const actual = cola[i];
     const ax = actual % ancho;
     const ay = (actual - ax) / ancho;
@@ -99,6 +101,7 @@ function bfs(
       if (!pasoValido(mapa, ax, ay, nx, ny)) continue;
       const idx = ny * ancho + nx;
       if (visitado[idx]) continue;
+      if (cola.length >= maxNodos) return null;
       visitado[idx] = 1;
       previo[idx] = actual;
 
@@ -135,11 +138,17 @@ export function buscarRuta(
 
   const puntos: Celda[] = [{ x: ox, y: oy }, ...base];
   const ruta: Celda[] = [];
+  const lookahead = 24;
   let i = 0;
   while (i < puntos.length - 1) {
-    let j = puntos.length - 1;
-    while (j > i + 1 && !lineaLibre(mapa, puntos[i].x, puntos[i].y, puntos[j].x, puntos[j].y)) {
-      j--;
+    let j = i;
+    let siguiente = i + 1;
+    while (siguiente < puntos.length && siguiente - i <= lookahead && lineaLibre(mapa, puntos[i].x, puntos[i].y, puntos[siguiente].x, puntos[siguiente].y)) {
+      j = siguiente;
+      siguiente++;
+    }
+    if (j === i) {
+      j = i + 1;
     }
     ruta.push(...linea(puntos[i].x, puntos[i].y, puntos[j].x, puntos[j].y));
     i = j;
@@ -153,7 +162,8 @@ export function buscarRutaA(
   mapa: Mapa,
   ox: number,
   oy: number,
-  esMeta: (x: number, y: number) => boolean
+  esMeta: (x: number, y: number) => boolean,
+  maxNodos = 6000
 ): Celda[] | null {
   if (esMeta(ox, oy)) return [];
   const ancho = mapa.ancho;
@@ -164,6 +174,7 @@ export function buscarRutaA(
   visitado[inicio] = 1;
 
   for (let i = 0; i < cola.length; i++) {
+    if (cola.length >= maxNodos) return null;
     const actual = cola[i];
     const ax = actual % ancho;
     const ay = (actual - ax) / ancho;
@@ -175,6 +186,7 @@ export function buscarRutaA(
       if (!pasoValido(mapa, ax, ay, nx, ny)) continue;
       const idx = ny * ancho + nx;
       if (visitado[idx]) continue;
+      if (cola.length >= maxNodos) return null;
       visitado[idx] = 1;
       previo[idx] = actual;
 
