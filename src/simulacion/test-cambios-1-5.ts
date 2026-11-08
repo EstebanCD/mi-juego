@@ -238,5 +238,18 @@ function crearMapaSimple(): Mapa {
   assert(base.reina!.x === 100 && base.reina!.y === 100, "La reina debe posicionarse en el origen indicado");
   assert(sim.stock[1].agua >= 0 && sim.stock[1].arcilla >= 0 && sim.stock[1].nectar >= 0, "El stock del segundo jugador debe permanecer válido");
 }
+{
+  const sim = new Simulacion(new Mapa(200, 200));
+  sim.crearBaseInicial(0, 10, 10);
+  sim.crearBaseInicial(1, 160, 160, [], 0);
+
+  for (let i = 0; i < 3000; i++) {
+    sim.tick();
+  }
+
+  const guerreras = sim.unidades.filter((u) => u.jugador === 1 && u.tipo === TipoUnidad.Guerrera);
+  assert(guerreras.length === 10, "Cada oleada enemiga debe crear 10 guerreras");
+  assert(guerreras.some((u) => u.ruta.length > 0), "Las guerreras creadas deben quedar moviéndose hacia la base del jugador");
+}
 
 console.log("PASS: cambios 1, 3, 4 y 5 verificadas");

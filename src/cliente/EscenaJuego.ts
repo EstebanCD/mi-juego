@@ -865,7 +865,6 @@ export class EscenaJuego extends Phaser.Scene {
     const baseEnemigaOrigenX = this.sim.mapa.ancho - 1 - 8;
     const baseEnemigaOrigenY = this.sim.mapa.alto - 1 - 17;
     const unidadesEnemigas: number[] = [];
-    for (let i = 0; i < 10; i++) unidadesEnemigas.push(TipoUnidad.Guerrera);
     for (let i = 0; i < 20; i++) unidadesEnemigas.push(TipoUnidad.Voladora);
     this.sim.crearBaseInicial(1, baseEnemigaOrigenX, baseEnemigaOrigenY, unidadesEnemigas, 0);
 

@@ -352,6 +352,31 @@ export class Simulacion {
     this.ataqueInicialEmitido = true;
   }
 
+  private generarOleadaGuerrerasEnemigas(): void {
+    if (this.tickActual <= 0 || this.tickActual % 3000 !== 0) return;
+
+    const reinaEnemiga = this.edificios.find((edificio) => edificio.jugador === 1 && edificio.tipo === TipoEdificio.Reina)
+      ?? this.edificios.find((edificio) => edificio.jugador === 1 && edificio.tipo === TipoEdificio.Madriguera)
+      ?? this.edificios.find((edificio) => edificio.jugador === 1);
+    const reinaJugador = this.edificios.find((edificio) => edificio.jugador === 0 && edificio.tipo === TipoEdificio.Reina)
+      ?? this.edificios.find((edificio) => edificio.jugador === 0);
+
+    if (!reinaEnemiga || !reinaJugador) return;
+
+    const posiciones = this.obtenerCeldasSpawnBase(reinaEnemiga.x, reinaEnemiga.y, 10, true);
+    for (let i = 0; i < 10; i++) {
+      const pos = posiciones[i] ?? { x: reinaEnemiga.x + 2 + (i % 3), y: reinaEnemiga.y + 2 + Math.floor(i / 3) };
+      const guerrera = this.crearUnidad(TipoUnidad.Guerrera, pos.x, pos.y, 1);
+      this.ordenes.push({
+        tipo: "mover",
+        unidadId: guerrera.id,
+        x: reinaJugador.x,
+        y: reinaJugador.y,
+        jugador: 1,
+      });
+    }
+  }
+
   private siguienteAleatorio(): number {
     this.estadoAleatorio = (this.estadoAleatorio * 1664525 + 1013904223) >>> 0;
     return this.estadoAleatorio / 0x100000000;
@@ -546,6 +571,7 @@ export class Simulacion {
     if (this.tickActual >= 10000) {
       this.esDeNoche = true;
     }
+    this.generarOleadaGuerrerasEnemigas();
     if (!this.ataqueInicialEmitido) {
       this.emitirAtaqueInicialProgramado();
     }
