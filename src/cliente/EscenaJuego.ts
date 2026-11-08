@@ -1,7 +1,7 @@
 import Phaser from "phaser";
 import { Terreno, Recurso } from "../simulacion/mapa";
 import { crearMapaPrueba } from "../simulacion/mapaPrueba";
-import { DATOS_EDIFICIO, type Edificio } from "../simulacion/edificio";
+import { DATOS_EDIFICIO, EDIFICIOS_CONSTRUIBLES_POR_OBRERA, FORMAS_EDIFICIO, type Edificio } from "../simulacion/edificio";
 import { type Cadaver } from "../simulacion/cadaver";
 import { DATOS_UNIDAD, Estado, type Unidad } from "../simulacion/unidad";
 import {
@@ -22,9 +22,41 @@ import {
 } from "../simulacion/simulacion";
 import type { ObjetivoCombate } from "../simulacion/unidad";
 
-const DEBUG = import.meta.env.DEV;
+const DEBUG = typeof import.meta !== "undefined" && import.meta.env ? !!import.meta.env.DEV : false;
 
 const TAM = 32; // tamaño de celda en pantalla (px)
+const ALTO_HUD_INFERIOR = 176;
+const MAX_CELDAS_ARRASTRE = 40;
+const BTN_W = 78;
+const BTN_H = 72;
+const BTN_GAP = 6;
+const ACCION_BTN_W = 104;
+const ACCION_BTN_H = 34;
+const ACCION_BTN_GAP = 8;
+const COLA_BTN_W = 230; // ancho de los botones de la lista de producción (antes 72)
+const COLA_BTN_H = 17;
+const COLA_BTN_PASO = 19; // separación vertical entre botones
+// Hotkeys de los botones. La letra de la tecla se subraya en el texto del botón
+// (primera aparición de esa letra en la etiqueta).
+const HOTKEY_ACCION: Record<string, string> = {
+  Attack: "A",
+  Build: "B",
+  Tame: "T",
+  "Repair Building": "R",
+  "Carry Corpse": "C",
+  "Leave Corpse": "C",
+  "Cure Disease": "C",
+  "Delete building": "D",
+};
+const HOTKEY_EDIFICIO: Record<number, string> = {
+  [TipoEdificio.Palacio]: "P",
+  [TipoEdificio.Torre]: "T",
+  [TipoEdificio.Madriguera]: "D", // se muestra como "Depósito"
+  [TipoEdificio.Muralla]: "M",
+};
+const COLA_GAP_A_ACCIONES = 14; // separación mínima entre la lista y la columna de botones de unidades
+const COLA_BTN_W_MIN = 150; // ancho mínimo si la ventana es muy estrecha
+const HUD_PADDING = 12;
 // Velocidad visual constante (px/s), ligada a la velocidad real de la simulación.
 // El 1.1 evita que el círculo se quede cada vez más rezagado.
 const VELOCIDAD_VISUAL = (TAM / (TICKS_POR_PASO * MS_POR_TICK)) * 1000 * 1.1;
@@ -45,9 +77,8 @@ const NOMBRES_ESTADO = [
   "Domesticando",
   "Yendo al cadáver",
   "Yendo a dejar el cadáver",
+  "Construyendo",
 ];
-const NOMBRES_EDIFICIO = ["Manojo de Arcilla (Palacio)", "Madriguera", "Muralla", "Reina"];
-
 const COLOR_CARGA_AGUA = 0x4aa8ff;
 const COLOR_CARGA_ARCILLA = 0xffd23f;
 const COLOR_CARGA_NECTAR = 0xff69b4;
@@ -82,6 +113,7 @@ export class EscenaJuego extends Phaser.Scene {
   private readonly jugadorLocal = 0;
   private teclas!: Phaser.Types.Input.Keyboard.CursorKeys;
   private teclaAtaque!: Phaser.Input.Keyboard.Key;
+  private teclaEscape!: Phaser.Input.Keyboard.Key;
   private teclaF3!: Phaser.Input.Keyboard.Key;
   private debugText!: Phaser.GameObjects.Text;
   private debugVisible = true;
@@ -94,20 +126,35 @@ export class EscenaJuego extends Phaser.Scene {
   private modoDomesticar = false;
   private modoLlevarCadaver = false;
   private readonly cursorPuntoRojo = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Ccircle cx='6' cy='6' r='4' fill='%23ff3030' stroke='%23ffffff' stroke-width='1'/%3E%3C/svg%3E\") 6 6, crosshair";
+  private readonly cursorPuntoAzul = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Ccircle cx='6' cy='6' r='4' fill='%233478f6' stroke='%23ffffff' stroke-width='1'/%3E%3C/svg%3E\") 6 6, crosshair";
+  private readonly cursorPuntoVerde = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Ccircle cx='6' cy='6' r='4' fill='%232ecc71' stroke='%23ffffff' stroke-width='1'/%3E%3C/svg%3E\") 6 6, crosshair";
+  private readonly cursorPuntoAmarillo = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Ccircle cx='6' cy='6' r='4' fill='%23f4c542' stroke='%23ffffff' stroke-width='1'/%3E%3C/svg%3E\") 6 6, crosshair";
   private sim!: Simulacion;
   private acumulador = 0;
   private textoMensajeError = "";
   private temporizadorError = 0;
   private textoErrorHUD!: Phaser.GameObjects.Text;
   private textoTick!: Phaser.GameObjects.Text;
+  private grupoInfoHUD!: Phaser.GameObjects.Container;
   private textoInfo!: Phaser.GameObjects.Text;
   private textoColaProduccion!: Phaser.GameObjects.Text;
+  private filasColaProduccion: Array<{
+    bg: Phaser.GameObjects.Rectangle;
+    progreso: Phaser.GameObjects.Rectangle;
+    texto: Phaser.GameObjects.Text;
+    cruz: Phaser.GameObjects.Text;
+    nombre: string;
+    itemId: number | undefined;
+  }> = [];
+  private botonesColaProduccion: Phaser.GameObjects.Rectangle[] = [];
+  private claveColaProduccion = "";
+  private anchoColaActual = COLA_BTN_W;
   private textoEnfermedadHUD!: Phaser.GameObjects.Text;
   private textoRegenHUD!: Phaser.GameObjects.Text;
   private ultimoTextoRegenHUD = "";
   private overlayNoche!: Phaser.GameObjects.Rectangle;
   private hudTopBg!: Phaser.GameObjects.Rectangle;
-  private hudBottomBg!: Phaser.GameObjects.Rectangle;
+  private hudBottomBg!: Phaser.GameObjects.Graphics;
   private graficoCeldasAgotadas!: Phaser.GameObjects.Graphics;
   private floresBlitter?: Phaser.GameObjects.Blitter;
   private readonly floresBobs = new Map<number, {
@@ -128,10 +175,12 @@ export class EscenaJuego extends Phaser.Scene {
   private rectMM = { x: 15, y: 0, w: 80, h: 74 };
   private minimapaTerrenoSucio = true;
   private rectSeleccionCelda!: Phaser.GameObjects.Rectangle;
+  private graficoSeleccionEdificio!: Phaser.GameObjects.Graphics;
+  private brilloSeleccionEdificio!: Phaser.GameObjects.Image;
   private marcadorRendezvous!: Phaser.GameObjects.Rectangle;
   private camUI!: Phaser.Cameras.Scene2D.Camera;
   private circulos = new Map<number, Phaser.GameObjects.Shape>();
-  private edificiosVisuales = new Map<number, Phaser.GameObjects.Rectangle>();
+  private edificiosVisuales = new Map<number, Phaser.GameObjects.Image>();
   private cadaveresVisuales = new Map<number, Phaser.GameObjects.Rectangle>();
   // Posición visual "base" de cada unidad (sigue a su celda) y un desvío
   // temporal encima (por ejemplo, el acercamiento al entregar).
@@ -142,7 +191,7 @@ export class EscenaJuego extends Phaser.Scene {
   private unidadVisible = new Map<number, boolean>();
   private barrasSalud = new Map<number, BarraSalud>();
   private coloresOriginalesFlash = new WeakMap<
-    Phaser.GameObjects.Shape | Phaser.GameObjects.Rectangle,
+    Phaser.GameObjects.Shape | Phaser.GameObjects.Rectangle | Phaser.GameObjects.Image,
     { color: number; temporizador: Phaser.Time.TimerEvent }
   >();
   private animacionesPulgonesCurando = new Map<number, AnimacionPulgonCurando>();
@@ -152,6 +201,7 @@ export class EscenaJuego extends Phaser.Scene {
   private animacionesDomesticacion = new Set<number>();
   private barrasDomesticacion = new Map<number, BarraDomesticacion>();
   private readonly celdasConRecurso = new Set<number>();
+  private animacionesCadaveres = new Map<number, { cargado: boolean; animInicio: number; animTipo: "carga" | "descarga" | null }>();
   private liveUnitIds = new Set<number>();
   private liveBuildingIds = new Set<number>();
   private liveCorpseIds = new Set<number>();
@@ -198,10 +248,33 @@ export class EscenaJuego extends Phaser.Scene {
   private botonesAccion: Phaser.GameObjects.Rectangle[] = [];
   private textosBotonAccion: Phaser.GameObjects.Text[] = [];
   private accionesBotonesActuales: Array<{ label: string; accion: string }> = [];
-
+  private textosCostoAccion: Array<{ texto: Phaser.GameObjects.Text; recurso: "agua" | "arcilla" | "nectar"; valor: number }> = [];
+  private textosCostoConstruccion: Array<{ texto: Phaser.GameObjects.Text; recurso: "agua" | "arcilla" | "nectar"; valor: number }> = [];
+  private botonesConstruccion: Phaser.GameObjects.Rectangle[] = [];
+  private textosBotonConstruccion: Phaser.GameObjects.Text[] = [];
+  private tiposBotonesConstruccion: number[] = [];
+  private subrayadosBotonAccion: Phaser.GameObjects.Rectangle[] = [];
+  private subrayadosBotonConstruccion: Phaser.GameObjects.Rectangle[] = [];
+  private tooltipHUD?: Phaser.GameObjects.Text;
+  private tooltipTimer?: Phaser.Time.TimerEvent;
+  private ctxMedicionTexto: CanvasRenderingContext2D | null = null;
+  private ultimoRefrescoCostos = 0;
+  private modoConstruccion: number | null = null;
+  private menuConstruccionAbierto = false;
+  private clicConsumidoPorHUD = false;
+  private pointerDownEnHUD = false;
+  private arrastreConstruccion: { inicio: { x: number; y: number }; fin: { x: number; y: number } } | null = null;
+  private previewLinea: Phaser.GameObjects.Image[] = [];
+  private textoCosteLinea?: Phaser.GameObjects.Text;
+  private previewTipo: number | null = null;
+  private previewConstruccion?: Phaser.GameObjects.Image;
 
   constructor() {
     super("EscenaJuego");
+  }
+
+  private esConstruccionArrastrable(tipo: number | null): boolean {
+    return tipo === TipoEdificio.Muralla;
   }
 
   private resetModosAccion(): void {
@@ -210,16 +283,67 @@ export class EscenaJuego extends Phaser.Scene {
     this.modoReparacionEdificio = false;
     this.modoDomesticar = false;
     this.modoLlevarCadaver = false;
+    this.modoConstruccion = null;
+    this.arrastreConstruccion = null;
+    this.previewTipo = null;
+    this.menuConstruccionAbierto = false;
+    this.pointerDownEnHUD = false;
+    this.clicConsumidoPorHUD = false;
+    this.limpiarBotonesConstruccion();
+    this.limpiarBotonesAccion();
+    if (this.previewConstruccion) this.previewConstruccion.setVisible(false);
+    this.previewLinea.forEach((item) => item.destroy());
+    this.previewLinea = [];
+    if (this.textoCosteLinea) this.textoCosteLinea.destroy();
+    this.textoCosteLinea = undefined;
+    this.actualizarCursorModoSeleccion();
   }
 
   private coloresJugador(jugador: number): (typeof PALETA_JUGADORES)[number] {
     return jugador < 0 ? PALETA_GAIA : PALETA_JUGADORES[jugador % PALETA_JUGADORES.length];
   }
 
+  private obtenerColorHudSeleccionado(): number | null {
+    if (this.seleccionadaEdificio !== null) {
+      const edificio = this.buildingById.get(this.seleccionadaEdificio);
+      if (edificio) return edificio.jugador;
+    }
+
+    const unidadInspeccionada = this.unidadInspeccionadaEnemiga !== null ? this.unitById.get(this.unidadInspeccionadaEnemiga) : undefined;
+    if (unidadInspeccionada) return unidadInspeccionada.jugador;
+
+    const unidades = this.sim.unidades.filter((u) => this.seleccionadas.has(u.id));
+    if (unidades.length === 0) return null;
+
+    const jugadores = [...new Set(unidades.map((u) => u.jugador))];
+    if (jugadores.length !== 1) return null;
+    return jugadores[0];
+  }
+
+  private actualizarFondoHudPorSeleccion(): void {
+    const sw = this.scale.width;
+    const sh = this.scale.height;
+    const colorJugador = this.obtenerColorHudSeleccionado();
+    const lineaAltura = 4;
+
+    this.hudBottomBg.clear();
+    this.hudBottomBg.fillGradientStyle(0x0b0b12, 0x0b0b12, 0x0b0b12, 0x0b0b12, 0, 0, 0.93, 0.93);
+    this.hudBottomBg.fillRect(0, sh - ALTO_HUD_INFERIOR, sw, ALTO_HUD_INFERIOR);
+
+    if (colorJugador === null || colorJugador === undefined) return;
+
+    const paleta = this.coloresJugador(colorJugador);
+    const alphaBase = 0.36;
+    const y = sh - ALTO_HUD_INFERIOR + ALTO_HUD_INFERIOR - lineaAltura;
+    this.hudBottomBg.fillGradientStyle(paleta.edificio, paleta.edificio, paleta.unidad, paleta.unidad, 0, 0, alphaBase, alphaBase);
+    this.hudBottomBg.fillRect(0, y, sw, lineaAltura);
+  }
+
   private radioUnidad(tipo: number): number {
     if (tipo === TipoUnidad.Pulgones) return 4.5;
     if (tipo === TipoUnidad.Voladora) return 10;
     if (tipo === TipoUnidad.GuerreraVoladora) return 12;
+    if (tipo === TipoUnidad.Reina || tipo === TipoUnidad.ReinaJoven) return 14;
     return 9;
   }
 
@@ -233,6 +357,9 @@ export class EscenaJuego extends Phaser.Scene {
     let forma: Phaser.GameObjects.Shape;
     if (unidad.tipo === TipoUnidad.Guerrera) {
       forma = this.add.polygon(x, y, this.verticesPoligono(6, radio), color).setOrigin(0.5, 0.5);
+    } else if (unidad.tipo === TipoUnidad.Reina || unidad.tipo === TipoUnidad.ReinaJoven) {
+      forma = this.add.polygon(x, y, this.verticesEstrella(7, radio, radio * 0.52), color).setOrigin(0.5, 0.5);
+      forma.setRotation(Math.PI / 2);
     } else if (unidad.tipo === TipoUnidad.Voladora) {
       forma = this.add.polygon(x, y, [9, 0, 18, 22, 0, 22], color).setOrigin(0.5, 2 / 3);
     } else if (unidad.tipo === TipoUnidad.GuerreraVoladora) {
@@ -240,7 +367,7 @@ export class EscenaJuego extends Phaser.Scene {
     } else {
       forma = this.add.circle(x, y, radio, color);
     }
-    return forma.setDepth(3);
+    return forma.setDepth(4);
   }
 
   private verticesPoligono(lados: number, radio: number): number[] {
@@ -250,6 +377,20 @@ export class EscenaJuego extends Phaser.Scene {
       vertices.push(radio + Math.cos(angulo) * radio, radio + Math.sin(angulo) * radio);
     }
     return vertices;
+  }
+
+  private verticesEstrella(puntas: number, radioExterior: number, radioInterior: number): number[] {
+    const puntos: number[] = [];
+    const total = puntas * 2;
+    for (let i = 0; i < total; i++) {
+      const angulo = -Math.PI / 2 + (i * Math.PI) / puntas;
+      const radio = i % 2 === 0 ? radioExterior : radioInterior;
+      puntos.push(
+        radio * Math.cos(angulo),
+        radio * Math.sin(angulo)
+      );
+    }
+    return puntos;
   }
 
   private verticesTrianguloRotado(cx: number, cy: number, ancho: number, alto: number, rot: number): number[] {
@@ -275,8 +416,28 @@ export class EscenaJuego extends Phaser.Scene {
     );
   }
 
-  private actualizarCursorAtaque(): void {
-    this.game.canvas.style.cursor = this.modoAtaque ? this.cursorPuntoRojo : "";
+  private hayEdificioSeleccionadoQuePuedeAtacar(): boolean {
+    if (this.seleccionadaEdificio === null) return false;
+    const edificio = this.sim.edificios.find((e) => e.id === this.seleccionadaEdificio);
+    return !!edificio && !edificio.enConstruccion && (DATOS_EDIFICIO[edificio.tipo]?.atk ?? 0) > 0;
+  }
+
+  private guerrerasSeleccionadas(): Unidad[] {
+    return [...this.seleccionadas]
+      .map((id) => this.sim.unidades.find((u) => u.id === id))
+      .filter((u): u is Unidad => !!u && u.tipo === TipoUnidad.Guerrera && u.jugador === this.jugadorLocal);
+  }
+
+  private actualizarCursorModoSeleccion(): void {
+    this.game.canvas.style.cursor = this.modoAtaque
+      ? this.cursorPuntoRojo
+      : this.modoDomesticar
+        ? this.cursorPuntoAzul
+        : this.modoCuracion || this.modoLlevarCadaver
+          ? this.cursorPuntoVerde
+          : this.modoReparacionEdificio
+            ? this.cursorPuntoAmarillo
+            : "";
   }
 
   private actualizarOverlayDebug(): void {
@@ -493,10 +654,9 @@ export class EscenaJuego extends Phaser.Scene {
       .setOrigin(0, 0)
       .setDepth(10);
 
-    this.hudBottomBg = this.add
-      .rectangle(0, sh - 117, sw, 117, 0x111118, 0.9)
-      .setOrigin(0, 0)
-      .setDepth(10);
+    this.hudBottomBg = this.add.graphics().setDepth(10);
+    this.hudBottomBg.fillGradientStyle(0x0b0b12, 0x0b0b12, 0x0b0b12, 0x0b0b12, 0, 0, 0.93, 0.93);
+    this.hudBottomBg.fillRect(0, sh - ALTO_HUD_INFERIOR, sw, ALTO_HUD_INFERIOR);
 
     this.graficoMinimapa = this.add.graphics().setDepth(12);
     this.graficoBarrasUnidades = this.add.graphics().setDepth(6);
@@ -536,6 +696,16 @@ export class EscenaJuego extends Phaser.Scene {
       .setVisible(false);
     this.camUI.ignore(this.rectSeleccionCelda);
 
+    this.graficoSeleccionEdificio = this.add.graphics().setDepth(6);
+    this.brilloSeleccionEdificio = this.add
+      .image(0, 0, "")
+      .setOrigin(0, 0)
+      .setDepth(5)
+      .setVisible(false)
+      .setBlendMode(Phaser.BlendModes.ADD)
+      .setAlpha(0.2);
+    this.camUI.ignore([this.graficoSeleccionEdificio, this.brilloSeleccionEdificio]);
+
     this.marcadorRendezvous = this.add
       .rectangle(-100, -100, TAM, TAM, 0x59d5c5, 0.16)
       .setOrigin(0, 0)
@@ -565,43 +735,57 @@ export class EscenaJuego extends Phaser.Scene {
       this.actualizarVisibilidadBarrasSalud();
     });
 
-    // Panel de información: en el HUD inferior (a la derecha del minimapa)
+    // Panel de información: en el HUD inferior (centrado dentro del panel)
     this.textoInfo = this.add
-      .text(120, sh - 108, "", {
+      .text(0, 0, "", {
         color: "#e0e0e0",
         fontSize: "13px",
         lineSpacing: 4,
       })
-      .setDepth(12)
+      .setAlign("center")
+      .setOrigin(0.5, 0)
+      .setDepth(11)
       .setVisible(false);
 
     this.textoColaProduccion = this.add
-      .text(sw - 260, sh - 108, "", {
+      .text(sw - 310, sh - ALTO_HUD_INFERIOR + 12, "", {
         color: "#dfe8ff",
-        fontSize: "11px",
+        fontSize: "12px",
+        fontStyle: "bold",
         lineSpacing: 3,
-        wordWrap: { width: 180 },
+        wordWrap: { width: 190 },
       })
       .setDepth(12)
       .setVisible(false);
 
     this.textoEnfermedadHUD = this.add
-      .text(120, sh - 38, "", {
+      .text(-70, -26, "", {
         color: "#ff4d4d",
         fontSize: "13px",
         fontStyle: "bold",
       })
-      .setDepth(12)
+      .setAlign("center")
+      .setOrigin(0.5, 0)
+      .setDepth(13)
       .setVisible(false);
 
     this.textoRegenHUD = this.add
-      .text(250, sh - 38, "", {
+      .text(70, -26, "", {
         color: "#65f28c",
         fontSize: "13px",
         fontStyle: "bold",
       })
-      .setDepth(12)
+      .setAlign("center")
+      .setOrigin(0.5, 0)
+      .setDepth(13)
       .setVisible(false);
+
+    this.grupoInfoHUD = this.add.container(sw / 2, sh - 78, [
+      this.textoEnfermedadHUD,
+      this.textoRegenHUD,
+      this.textoInfo,
+    ]);
+    this.grupoInfoHUD.setDepth(11);
 
     this.textoErrorHUD = this.add
       .text(sw / 2, 14, "", { color: "#ff4444", fontSize: "16px", fontStyle: "bold" })
@@ -654,11 +838,12 @@ export class EscenaJuego extends Phaser.Scene {
       const h = size.height;
       this.camUI.setSize(w, h);
       this.hudTopBg.setSize(w, 44);
-      this.hudBottomBg.setPosition(0, h - 117).setSize(w, 117);
-      this.textoInfo.setPosition(120, h - 108);
-      this.textoColaProduccion.setPosition(w - 260, h - 108);
-      this.textoEnfermedadHUD.setPosition(120, h - 38);
-      this.textoRegenHUD.setPosition(250, h - 38);
+      this.actualizarFondoHudPorSeleccion();
+      this.grupoInfoHUD.setPosition(w / 2, h - 78);
+      const geoCola = this.geometriaColaProduccion();
+      this.textoColaProduccion.setPosition(geoCola.left, h - ALTO_HUD_INFERIOR + 12);
+      this.textoColaProduccion.setWordWrapWidth(geoCola.ancho);
+      this.claveColaProduccion = ""; // fuerza reconstruir la lista en su nueva posición
       this.textoErrorHUD.setX(w / 2);
       this.botonSaludBg.setX(w - 70);
       this.textoBotonSalud.setX(w - 70);
@@ -666,6 +851,9 @@ export class EscenaJuego extends Phaser.Scene {
       this.minimapaTerrenoSucio = true;
       this.ultimoMinimapaDinamico = 0;
       this.limpiarBotonesAccion(); // se recrean en su nueva posición
+      if (this.menuConstruccionAbierto) {
+        this.crearBotonesConstruccion(Array.from(EDIFICIOS_CONSTRUIBLES_POR_OBRERA));
+      }
     });
 
     // Nota: con el Palacio deshabilitado por ahora se ocultan temporalmente:
@@ -673,13 +861,15 @@ export class EscenaJuego extends Phaser.Scene {
     // - producir la Reina Joven
     // - construir una segunda Reina
     // La Reina sigue siendo el único depósito inicial.
-    this.sim.crearEdificio(TipoEdificio.Reina, 0, 8, 17);
+    this.sim.crearBaseInicial(0, 8, 17);
+    const baseEnemigaOrigenX = this.sim.mapa.ancho - 1 - 8;
+    const baseEnemigaOrigenY = this.sim.mapa.alto - 1 - 17;
+    const unidadesEnemigas: number[] = [];
+    for (let i = 0; i < 10; i++) unidadesEnemigas.push(TipoUnidad.Guerrera);
+    for (let i = 0; i < 20; i++) unidadesEnemigas.push(TipoUnidad.Voladora);
+    this.sim.crearBaseInicial(1, baseEnemigaOrigenX, baseEnemigaOrigenY, unidadesEnemigas, 0);
+
     this.dibujarEdificios();
-    this.sim.crearUnidad(TipoUnidad.Obrera, 10, 12);
-    this.sim.crearUnidad(TipoUnidad.Obrera, 11, 12);
-    this.sim.crearUnidad(TipoUnidad.Obrera, 12, 12);
-    this.sim.crearUnidad(TipoUnidad.Pulgones, 14, 12);
-    this.sim.crearUnidad(TipoUnidad.Obrera, 20, 12, 1);
     this.crearCirculos();
     this.configurarRaton();
     // Empezar mirando la base (palacio y unidades iniciales)
@@ -690,6 +880,7 @@ export class EscenaJuego extends Phaser.Scene {
   private shutdown(): void {
     // LEAK: scene restart without removing resize/input listeners leaves stale handlers around.
     this.scale.off("resize");
+    this.input.keyboard?.off("keydown", this.manejarHotkeyBotones, this);
     this.input.off("pointerdown");
     this.input.off("pointermove");
     this.input.off("pointerup");
@@ -702,6 +893,9 @@ export class EscenaJuego extends Phaser.Scene {
       if (this.textures.exists(terrainKey)) this.textures.remove(terrainKey);
     }
     this.terrenoTextureKeys.length = 0;
+    const textureKeys = Object.keys(this.textures.list)
+      .filter((key) => key.startsWith("edificio_"));
+    for (const key of textureKeys) this.textures.remove(key);
     if (this.textures.exists("minimapaTerreno")) this.textures.remove("minimapaTerreno");
     for (const terrainImage of this.terrenoMapas) terrainImage.destroy();
     this.terrenoMapas = [];
@@ -712,8 +906,15 @@ export class EscenaJuego extends Phaser.Scene {
     this.angulos.clear();
     this.angulosDeseados.clear();
     this.giroForzadoHasta.clear();
+    this.animacionesCadaveres.clear();
     if (this.graficoCeldasAgotadas) {
       this.graficoCeldasAgotadas.destroy();
+    }
+    if (this.graficoSeleccionEdificio) {
+      this.graficoSeleccionEdificio.destroy();
+    }
+    if (this.brilloSeleccionEdificio) {
+      this.brilloSeleccionEdificio.destroy();
     }
     if (this.floresBlitter) {
       this.floresBlitter.destroy();
@@ -733,6 +934,18 @@ export class EscenaJuego extends Phaser.Scene {
       this.textosFlotantesPool = [];
       this.textosFlotantesOcupados.clear();
       this.textosFlotantesTokens.clear();
+    }
+    this.tooltipHUD = undefined;
+    this.tooltipTimer = undefined;
+    this.textoNotifCreacion = undefined;
+    this.previewConstruccion = undefined;
+    this.previewTipo = null;
+    this.arrastreConstruccion = null;
+    this.previewLinea.forEach((item) => item.destroy());
+    this.previewLinea = [];
+    if (this.textoCosteLinea) {
+      this.textoCosteLinea.destroy();
+      this.textoCosteLinea = undefined;
     }
   }
 
@@ -791,6 +1004,8 @@ export class EscenaJuego extends Phaser.Scene {
 
     this.teclas = this.input.keyboard!.createCursorKeys();
     this.teclaAtaque = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.A);
+    this.teclaEscape = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.ESC);
+    this.input.keyboard!.on("keydown", this.manejarHotkeyBotones, this);
   }
 
   // Un rectángulo por edificio (provisional hasta tener sprites)
@@ -819,9 +1034,60 @@ export class EscenaJuego extends Phaser.Scene {
     }
   }
 
+  private ensureTexturaEdificio(tipo: number, jugador: number): string {
+    const key = `edificio_${tipo}_${jugador}`;
+    if (this.textures.exists(key)) return key;
+
+    const datos = DATOS_EDIFICIO[tipo] ?? { ancho: 1, alto: 1 };
+    const ancho = Math.max(1, datos.ancho) * TAM;
+    const alto = Math.max(1, datos.alto) * TAM;
+    const paleta = jugador < 0 ? PALETA_GAIA : PALETA_JUGADORES[jugador % PALETA_JUGADORES.length];
+    const formas = FORMAS_EDIFICIO[tipo] ?? [[0, 0, 1, 1]];
+    const g = this.add.graphics();
+
+    if (tipo === TipoEdificio.Reina) {
+      const cx = ancho / 2;
+      const cy = alto / 2;
+      const radioExterior = Math.min(ancho, alto) * 0.38;
+      const radioInterior = radioExterior * 0.52;
+      const puntos: Array<{ x: number; y: number }> = [];
+      for (let i = 0; i < 14; i++) {
+        const angulo = -Math.PI / 2 + (i * Math.PI) / 7;
+        const radio = i % 2 === 0 ? radioExterior : radioInterior;
+        puntos.push({ x: cx + Math.cos(angulo) * radio, y: cy + Math.sin(angulo) * radio });
+      }
+      g.fillStyle(paleta.borde, 1);
+      g.fillCircle(cx, cy, radioExterior + 7);
+      g.fillStyle(paleta.edificio, 1);
+      g.fillCircle(cx, cy, radioExterior);
+      g.fillStyle(paleta.borde, 1);
+      g.fillPoints(puntos, true);
+      g.generateTexture(key, ancho, alto);
+      g.destroy();
+      return key;
+    }
+
+    for (const [x0, y0, x1, y1] of formas) {
+      const rx0 = Phaser.Math.Clamp(x0 * ancho - 2, 0, ancho);
+      const ry0 = Phaser.Math.Clamp(y0 * alto - 2, 0, alto);
+      const rx1 = Phaser.Math.Clamp(x1 * ancho + 2, 0, ancho);
+      const ry1 = Phaser.Math.Clamp(y1 * alto + 2, 0, alto);
+      g.fillStyle(paleta.borde, 1);
+      g.fillRect(rx0, ry0, Math.max(0, rx1 - rx0), Math.max(0, ry1 - ry0));
+    }
+
+    for (const [x0, y0, x1, y1] of formas) {
+      g.fillStyle(paleta.edificio, 1);
+      g.fillRect(x0 * ancho, y0 * alto, Math.max(0, (x1 - x0) * ancho), Math.max(0, (y1 - y0) * alto));
+    }
+
+    g.generateTexture(key, ancho, alto);
+    g.destroy();
+    return key;
+  }
+
   private dibujarEdificios(): void {
     for (const [id, visual] of this.edificiosVisuales) {
-      // PERF: O(1) liveBuildingIds avoids scanning all buildings for each visual.
       if (this.liveBuildingIds.has(id)) continue;
       if (this.edificiosMuriendo.has(id)) continue;
       this.edificiosMuriendo.add(id);
@@ -844,16 +1110,17 @@ export class EscenaJuego extends Phaser.Scene {
       });
     }
     for (const e of this.sim.edificios) {
-      if (this.edificiosDibujados.has(e.id)) continue;
-      this.edificiosDibujados.add(e.id);
-      const color = this.coloresJugador(e.jugador).edificio;
-      const r = this.add
-        .rectangle(e.x * TAM, e.y * TAM, e.ancho * TAM, e.alto * TAM, color)
-        .setOrigin(0, 0)
-        .setDepth(3)
-        .setStrokeStyle(2, this.coloresJugador(e.jugador).borde);
-      this.camUI.ignore(r); // la cámara de interfaz no dibuja el mundo
-      this.edificiosVisuales.set(e.id, r);
+      const key = this.ensureTexturaEdificio(e.tipo, e.jugador);
+      const visual = this.edificiosVisuales.get(e.id);
+      const maxHp = DATOS_EDIFICIO[e.tipo]?.hp ?? e.hp;
+      const alpha = e.enConstruccion ? 0.5 + 0.5 * (e.hp / maxHp) : 1;
+      if (visual) {
+        visual.setTexture(key).setPosition(e.x * TAM, e.y * TAM).setOrigin(0, 0).setAlpha(alpha);
+        continue;
+      }
+      const img = this.add.image(e.x * TAM, e.y * TAM, key).setOrigin(0, 0).setDepth(3).setAlpha(alpha);
+      this.camUI.ignore(img);
+      this.edificiosVisuales.set(e.id, img);
       this.crearBarraSalud(
         e.id,
         DATOS_EDIFICIO[e.tipo]?.hp ?? e.hp,
@@ -873,7 +1140,7 @@ export class EscenaJuego extends Phaser.Scene {
         visual = this.add
           .rectangle(cadaver.x * TAM + TAM / 2, cadaver.y * TAM + TAM / 2, 15, 15, color)
           .setRotation(Math.PI / 4)
-          .setDepth(3)
+          .setDepth(2)
           .setStrokeStyle(2, 0x24151b);
         this.camUI.ignore(visual);
         this.cadaveresVisuales.set(cadaver.id, visual);
@@ -944,6 +1211,11 @@ export class EscenaJuego extends Phaser.Scene {
       const proporcion = Math.max(0, Math.min(1, e.hp / barra.maximo));
       barra.bg.setPosition(x, y).setSize(ancho, 5);
       barra.fill.setPosition(x + 1, y + 1).setSize(Math.max(0, (ancho - 2) * proporcion), 3);
+      if (e.enConstruccion) {
+        barra.fill.setFillStyle(0x9aa0a6);
+      } else {
+        barra.fill.setFillStyle(0x42d66b);
+      }
       this.actualizarVisibilidadBarraSalud(barra);
     }
 
@@ -1101,6 +1373,7 @@ export class EscenaJuego extends Phaser.Scene {
       this.unidadVisible.delete(id);
       this.detenerAnimacionPulgon(id);
       this.detenerAnimacionReparacion(id);
+      this.animacionesCadaveres.delete(id);
       this.seleccionadas.delete(id);
       if (this.unidadInspeccionadaEnemiga === id) this.unidadInspeccionadaEnemiga = null;
     }
@@ -1144,19 +1417,90 @@ export class EscenaJuego extends Phaser.Scene {
     return !!(p.event as MouseEvent | undefined)?.shiftKey;
   }
 
+  private punteroSobreMinimapa(x: number, y: number): boolean {
+    const mm = this.rectMinimapa();
+    return x >= mm.x && x <= mm.x + mm.w && y >= mm.y && y <= mm.y + mm.h;
+  }
+
+  private punteroSobreBotonHUD(x: number, y: number): boolean {
+    for (const btn of this.botonesAccion) {
+      const bx = btn.x - btn.width / 2;
+      const by = btn.y - btn.height / 2;
+      if (x >= bx && x <= bx + btn.width && y >= by && y <= by + btn.height) return true;
+    }
+    for (const btn of this.botonesConstruccion) {
+      const bx = btn.x - btn.width / 2;
+      const by = btn.y - btn.height / 2;
+      if (x >= bx && x <= bx + btn.width && y >= by && y <= by + btn.height) return true;
+    }
+    for (const btn of this.botonesColaProduccion) {
+      const bx = btn.x - btn.width / 2;
+      const by = btn.y - btn.height / 2;
+      if (x >= bx && x <= bx + btn.width && y >= by && y <= by + btn.height) return true;
+    }
+    return false;
+  }
+
+  private punteroSobreHUD(x: number, y: number): boolean {
+    if (y < 44) return true;
+    if (this.punteroSobreMinimapa(x, y)) return true;
+    return this.punteroSobreBotonHUD(x, y);
+  }
+
+  private cerrarMenuConstruccion(): void {
+    this.menuConstruccionAbierto = false;
+    this.modoConstruccion = null;
+    this.limpiarBotonesConstruccion();
+    this.limpiarBotonesAccion();
+    this.pointerDownEnHUD = false;
+    this.clicConsumidoPorHUD = false;
+    if (this.previewConstruccion) this.previewConstruccion.setVisible(false);
+    this.panelDirty = true;
+  }
+
   private configurarRaton(): void {
     // Evita el menú contextual del navegador al hacer clic derecho
     this.input.mouse?.disableContextMenu();
 
     this.input.on("pointerdown", (p: Phaser.Input.Pointer) => {
+      if (this.clicConsumidoPorHUD) {
+        this.clicConsumidoPorHUD = false;
+        return;
+      }
       if (p.leftButtonDown()) {
-        if (p.y < 44) return; // HUD superior
-        if (p.y > this.scale.height - 117) {
-          const mm = this.rectMinimapa();
-          this.arrastrandoMinimapa =
-            p.x >= mm.x && p.x <= mm.x + mm.w && p.y >= mm.y && p.y <= mm.y + mm.h;
-          this.clicHUDInferior(p); // minimapa y botones de acción
+        if (this.modoConstruccion !== null) {
+          if (!this.esConstruccionArrastrable(this.modoConstruccion)) {
+            this.esArrastrandoMarquesina = false;
+            this.huboArrastre = false;
+            this.pointerDownEnHUD = false;
+            return;
+          }
+          if (this.punteroSobreHUD(p.x, p.y)) {
+            this.pointerDownEnHUD = true;
+            return;
+          }
+          this.arrastreConstruccion = {
+            inicio: this.celdaDesdePuntero(p),
+            fin: this.celdaDesdePuntero(p),
+          };
+          this.esArrastrandoMarquesina = false;
+          this.huboArrastre = false;
+          this.pointerDownEnHUD = false;
           return;
+        }
+        if (p.y < 44) return; // HUD superior
+        if (p.y > this.scale.height - ALTO_HUD_INFERIOR) {
+          const mm = this.rectMinimapa();
+          const sobreMinimapa = p.x >= mm.x && p.x <= mm.x + mm.w && p.y >= mm.y && p.y <= mm.y + mm.h;
+          if (sobreMinimapa) {
+            this.arrastrandoMinimapa = true;
+            this.clicHUDInferior(p);
+            return;
+          }
+          if (this.punteroSobreBotonHUD(p.x, p.y)) {
+            this.clicHUDInferior(p);
+            return;
+          }
         }
         if (this.shiftPulsado(p)) {
           // Shift + clic izquierdo: mover el mapa
@@ -1168,7 +1512,28 @@ export class EscenaJuego extends Phaser.Scene {
         this.huboArrastre = false;
         this.inicioArrastre = { x: p.x, y: p.y };
       } else if (p.rightButtonDown()) {
-        if (p.y < 44 || p.y > this.scale.height - 117) return;
+        if (this.modoConstruccion !== null) {
+          if (this.arrastreConstruccion) {
+            this.arrastreConstruccion = null;
+            this.previewLinea.forEach((item) => item.destroy());
+            this.previewLinea = [];
+            if (this.textoCosteLinea) this.textoCosteLinea.setVisible(false);
+            return;
+          }
+          this.modoConstruccion = null;
+          this.menuConstruccionAbierto = false;
+          this.limpiarBotonesConstruccion();
+          this.actualizarBotonesModo();
+          if (this.previewConstruccion) this.previewConstruccion.setVisible(false);
+          return;
+        }
+        if (p.y < 44) return; // HUD superior
+        if (p.y > this.scale.height - ALTO_HUD_INFERIOR) {
+          if (this.punteroSobreMinimapa(p.x, p.y) || this.punteroSobreBotonHUD(p.x, p.y)) {
+            this.clicHUDInferior(p);
+            return;
+          }
+        }
         const mundo = this.cameras.main.getWorldPoint(p.x, p.y);
         const x = Math.floor(mundo.x / TAM);
         const y = Math.floor(mundo.y / TAM);
@@ -1196,6 +1561,11 @@ export class EscenaJuego extends Phaser.Scene {
         cam.scrollY -= (p.y - p.prevPosition.y) / cam.zoom;
         return;
       }
+      if (this.esConstruccionArrastrable(this.modoConstruccion) && this.arrastreConstruccion && this.modoConstruccion !== null && p.leftButtonDown()) {
+        this.arrastreConstruccion.fin = this.celdaDesdePuntero(p);
+        this.actualizarPreviewConstruccion();
+        return;
+      }
       if (!this.esArrastrandoMarquesina) return;
       const x0 = this.inicioArrastre.x;
       const y0 = this.inicioArrastre.y;
@@ -1210,12 +1580,91 @@ export class EscenaJuego extends Phaser.Scene {
     });
 
     const alSoltar = (p: Phaser.Input.Pointer): void => {
+      if (this.pointerDownEnHUD || this.clicConsumidoPorHUD) {
+        this.pointerDownEnHUD = false;
+        this.clicConsumidoPorHUD = false;
+        return;
+      }
       if (this.arrastrandoMinimapa) {
         if (p.leftButtonReleased()) this.arrastrandoMinimapa = false;
         return;
       }
       if (this.panArrastrando) {
         if (p.leftButtonReleased()) this.panArrastrando = false;
+        return;
+      }
+      if (this.modoConstruccion !== null) {
+        this.esArrastrandoMarquesina = false;
+        this.graficoMarquesina.clear();
+        if (p.leftButtonReleased()) {
+          if (this.punteroSobreHUD(p.x, p.y) || this.clicConsumidoPorHUD) {
+            this.clicConsumidoPorHUD = false;
+            return;
+          }
+          const mundo = this.cameras.main.getWorldPoint(p.x, p.y);
+          const cx = Math.floor(mundo.x / TAM);
+          const cy = Math.floor(mundo.y / TAM);
+          if (this.arrastreConstruccion && (this.arrastreConstruccion.inicio.x !== cx || this.arrastreConstruccion.inicio.y !== cy)) {
+            const celdas = this.lineaDeConstruccion(this.arrastreConstruccion.inicio, this.arrastreConstruccion.fin);
+            const obreras = [...this.seleccionadas]
+              .map((id) => this.sim.unidades.find((u) => u.id === id))
+              .filter((u): u is Unidad => !!u && u.tipo === TipoUnidad.Obrera && u.jugador === this.jugadorLocal)
+              .sort((a, b) => a.id - b.id);
+            if (obreras.length === 0) {
+              this.mostrarMensajeError("Selecciona una obrera para construir");
+              this.arrastreConstruccion = null;
+              return;
+            }
+            this.sim.enviarOrden({
+              tipo: "construirLinea",
+              unidadIds: obreras.map((u) => u.id),
+              edificioTipo: this.modoConstruccion,
+              celdas,
+              jugador: this.jugadorLocal,
+            });
+            this.mostrarMarcador(cx, cy);
+            this.arrastreConstruccion = null;
+            this.previewLinea.forEach((item) => item.destroy());
+            this.previewLinea = [];
+            if (this.textoCosteLinea) this.textoCosteLinea.setVisible(false);
+            this.modoConstruccion = null;
+            this.menuConstruccionAbierto = false;
+            this.limpiarBotonesConstruccion();
+            this.actualizarBotonesModo();
+            if (this.previewConstruccion) this.previewConstruccion.setVisible(false);
+            this.panelDirty = true;
+            return;
+          }
+          if (!this.puedeColocarEdificioEn(cx, cy, this.modoConstruccion)) {
+            this.mostrarMensajeError("No se puede construir aquí");
+            this.actualizarPreviewConstruccion();
+            return;
+          }
+          const obreras = [...this.seleccionadas]
+            .map((id) => this.sim.unidades.find((u) => u.id === id))
+            .filter((u): u is Unidad => !!u && u.tipo === TipoUnidad.Obrera && u.jugador === this.jugadorLocal);
+          if (obreras.length === 0) {
+            this.mostrarMensajeError("Selecciona una obrera para construir");
+            return;
+          }
+          for (const obrera of obreras) {
+            this.sim.enviarOrden({
+              tipo: "construir",
+              unidadId: obrera.id,
+              edificioTipo: this.modoConstruccion,
+              x: cx,
+              y: cy,
+              jugador: this.jugadorLocal,
+            });
+          }
+          this.mostrarMarcador(cx, cy);
+          this.modoConstruccion = null;
+          this.menuConstruccionAbierto = false;
+          this.limpiarBotonesConstruccion();
+          this.actualizarBotonesModo();
+          if (this.previewConstruccion) this.previewConstruccion.setVisible(false);
+          this.panelDirty = true;
+        }
         return;
       }
       if (!this.esArrastrandoMarquesina || !p.leftButtonReleased()) return;
@@ -1301,7 +1750,6 @@ export class EscenaJuego extends Phaser.Scene {
       this.seleccionadaEdificio = null;
       this.celdaInfo = null;
       this.resetModosAccion();
-      this.actualizarCursorAtaque();
       this.rectSeleccionCelda.setVisible(false);
 
       for (const u of this.sim.unidades) {
@@ -1331,7 +1779,7 @@ export class EscenaJuego extends Phaser.Scene {
     this.cadaverInspeccionadoId = null;
     this.celdaInfo = null;
     this.resetModosAccion();
-    this.actualizarCursorAtaque();
+    this.actualizarCursorModoSeleccion();
     this.seleccionadaEdificio = edificio.id;
     this.rectSeleccionCelda.setVisible(false);
   }
@@ -1342,6 +1790,10 @@ export class EscenaJuego extends Phaser.Scene {
     const mundo = this.cameras.main.getWorldPoint(p.x, p.y);
     const cx = Math.floor(mundo.x / TAM);
     const cy = Math.floor(mundo.y / TAM);
+
+    if (this.modoConstruccion !== null) {
+      return;
+    }
 
     if (this.modoAtaque) {
       const unidadObjetivo = this.sim.unidades.find((u) => u.x === cx && u.y === cy);
@@ -1365,10 +1817,10 @@ export class EscenaJuego extends Phaser.Scene {
             jugador: this.jugadorLocal,
           });
         }
-        this.mostrarMarcador(cx, cy);
+        this.mostrarMarcador(cx, cy, 0xff3030);
       }
       this.modoAtaque = false;
-      this.actualizarCursorAtaque();
+      this.actualizarCursorModoSeleccion();
       this.actualizarBotonesModo();
       return;
     }
@@ -1385,7 +1837,7 @@ export class EscenaJuego extends Phaser.Scene {
         this.mostrarMarcador(cx, cy);
       }
       this.modoCuracion = false;
-      this.actualizarCursorAtaque();
+      this.actualizarCursorModoSeleccion();
       this.actualizarBotonesModo();
       return;
     }
@@ -1425,49 +1877,51 @@ export class EscenaJuego extends Phaser.Scene {
         }
       }
       this.modoDomesticar = false;
+      this.actualizarCursorModoSeleccion();
       this.actualizarBotonesModo();
       return;
     }
 
     if (this.modoLlevarCadaver) {
-      const guerrera = [...this.seleccionadas].map((id) => this.sim.unidades.find((u) => u.id === id)).find(
-        (u): u is Unidad => !!u && u.tipo === TipoUnidad.Guerrera && u.jugador === this.jugadorLocal
-      );
-      if (guerrera) {
-        const cadaver = this.sim.cadaveres.find((v) => v.x === cx && v.y === cy);
-        if (guerrera.cadaverCargado !== null) {
-          this.sim.enviarOrden({ tipo: "soltarCadaver", unidadId: guerrera.id, x: cx, y: cy, jugador: this.jugadorLocal });
-          this.modoLlevarCadaver = false;
-          this.actualizarBotonesModo();
-          this.mostrarMarcador(cx, cy);
-          return;
-        }
-        if (cadaver) {
-          this.sim.enviarOrden({ tipo: "cargarCadaver", unidadId: guerrera.id, cadaverId: cadaver.id, jugador: this.jugadorLocal });
-          this.modoLlevarCadaver = false;
-          this.actualizarBotonesModo();
-          this.mostrarMarcador(cx, cy);
-          return;
-        }
+      const guerreras = this.guerrerasSeleccionadas();
+      const guerrerasCargando = guerreras.filter((u) => u.cadaverCargado !== null);
+      if (guerrerasCargando.length > 0) {
+        const guerrera = guerrerasCargando.reduce((mejor, actual) => {
+          const mejorDist = Math.abs(mejor.x - cx) + Math.abs(mejor.y - cy);
+          const actualDist = Math.abs(actual.x - cx) + Math.abs(actual.y - cy);
+          return actualDist < mejorDist ? actual : mejor;
+        }, guerrerasCargando[0]);
+        this.sim.enviarOrden({ tipo: "soltarCadaver", unidadId: guerrera.id, x: cx, y: cy, jugador: this.jugadorLocal });
+        this.modoLlevarCadaver = false;
+        this.actualizarBotonesModo();
+        this.mostrarMarcador(cx, cy);
+        return;
       }
+
+      const cadaver = this.sim.cadaveres.find((v) => v.x === cx && v.y === cy);
+      if (cadaver) {
+        const guerrerasLibres = guerreras.filter((u) => u.cadaverCargado === null);
+        if (guerrerasLibres.length === 0) {
+          this.mostrarMensajeError("Todas las guerreras ya cargan un cadáver");
+          this.modoLlevarCadaver = false;
+          this.actualizarBotonesModo();
+          return;
+        }
+        const guerrera = guerrerasLibres.reduce((mejor, actual) => {
+          const mejorDist = Math.abs(mejor.x - cadaver.x) + Math.abs(mejor.y - cadaver.y);
+          const actualDist = Math.abs(actual.x - cadaver.x) + Math.abs(actual.y - cadaver.y);
+          return actualDist < mejorDist || (actualDist === mejorDist && actual.id < mejor.id) ? actual : mejor;
+        }, guerrerasLibres[0]);
+        this.sim.enviarOrden({ tipo: "cargarCadaver", unidadId: guerrera.id, cadaverId: cadaver.id, jugador: this.jugadorLocal });
+        this.modoLlevarCadaver = false;
+        this.actualizarBotonesModo();
+        this.mostrarMarcador(cx, cy);
+        return;
+      }
+
       this.modoLlevarCadaver = false;
       this.actualizarBotonesModo();
       return;
-    }
-
-    const cadaver = this.sim.cadaveres.find((v) => v.x === cx && v.y === cy);
-    if (cadaver) {
-      this.seleccionadas.clear();
-      this.unidadInspeccionadaEnemiga = null;
-      this.cadaverInspeccionadoId = cadaver.id;
-      this.seleccionadaEdificio = null;
-      this.celdaInfo = this.sim.mapa.dentro(cx, cy) ? { x: cx, y: cy } : null;
-      this.rectSeleccionCelda
-        .setPosition(cx * TAM, cy * TAM)
-        .setVisible(this.celdaInfo !== null);
-      return;
-    } else {
-      this.cadaverInspeccionadoId = null;
     }
 
     const u = this.sim.unidades.find(
@@ -1486,7 +1940,33 @@ export class EscenaJuego extends Phaser.Scene {
         this.cadaverInspeccionadoId = null;
         this.seleccionadaEdificio = null;
       }
+      this.celdaInfo = this.sim.mapa.dentro(cx, cy) ? { x: cx, y: cy } : null;
+      if (this.celdaInfo) {
+        this.rectSeleccionCelda
+          .setPosition(this.celdaInfo.x * TAM, this.celdaInfo.y * TAM)
+          .setVisible(true);
+      } else {
+        this.rectSeleccionCelda.setVisible(false);
+      }
+      return;
+    }
+
+    const cadaver = this.sim.cadaveres.find((v) => v.x === cx && v.y === cy);
+    if (cadaver) {
+      this.seleccionadas.clear();
+      this.unidadInspeccionadaEnemiga = null;
+      this.cadaverInspeccionadoId = cadaver.id;
+      this.seleccionadaEdificio = null;
+      this.celdaInfo = this.sim.mapa.dentro(cx, cy) ? { x: cx, y: cy } : null;
+      this.rectSeleccionCelda
+        .setPosition(cx * TAM, cy * TAM)
+        .setVisible(this.celdaInfo !== null);
+      return;
     } else {
+      this.cadaverInspeccionadoId = null;
+    }
+
+    {
       const ed = this.sim.edificios.find(
         (b) =>
           b.jugador === this.jugadorLocal &&
@@ -1566,19 +2046,21 @@ export class EscenaJuego extends Phaser.Scene {
     };
 
     const cadaverObjetivo = this.sim.cadaveres.find((c) => c.x === cx && c.y === cy);
-    const guerrerasSeleccionadas = unidadesSeleccionadas.filter((u) => u.tipo === TipoUnidad.Guerrera);
+    const guerrerasSeleccionadas = this.guerrerasSeleccionadas();
     if (cadaverObjetivo && guerrerasSeleccionadas.length > 0) {
-      const guerreraElegida = guerrerasSeleccionadas.reduce((mejor, actual) => {
+      const guerrerasLibres = guerrerasSeleccionadas.filter((u) => u.cadaverCargado === null);
+      if (guerrerasLibres.length === 0) {
+        this.mostrarMensajeError("Todas las guerreras ya cargan un cadáver");
+        this.mostrarMarcador(cx, cy);
+        return;
+      }
+      const guerreraElegida = guerrerasLibres.reduce((mejor, actual) => {
         const mejorDist = Math.abs(mejor.x - cx) + Math.abs(mejor.y - cy);
         const actualDist = Math.abs(actual.x - cx) + Math.abs(actual.y - cy);
-        return actualDist < mejorDist ? actual : mejor;
-      }, guerrerasSeleccionadas[0]);
+        return actualDist < mejorDist || (actualDist === mejorDist && actual.id < mejor.id) ? actual : mejor;
+      }, guerrerasLibres[0]);
       this.sim.enviarOrden({ tipo: "cargarCadaver", unidadId: guerreraElegida.id, cadaverId: cadaverObjetivo.id, jugador: this.jugadorLocal });
-      for (const id of ids) {
-        if (id === guerreraElegida.id) continue;
-        pedirMover(id, cx, cy);
-      }
-      this.mostrarMarcador(cx, cy);
+      this.mostrarMarcador(cx, cy, 0x00ff88);
       return;
     }
 
@@ -1673,6 +2155,19 @@ export class EscenaJuego extends Phaser.Scene {
       }
     }
 
+    const edificioSeleccionado = this.seleccionadaEdificio !== null
+      ? this.sim.edificios.find((b) => b.id === this.seleccionadaEdificio)
+      : null;
+
+    if (edificioSeleccionado && !edificioSeleccionado.enConstruccion && (DATOS_EDIFICIO[edificioSeleccionado.tipo]?.atk ?? 0) > 0 && (unidadEnemiga || (edificioObjetivo && edificioObjetivo.jugador !== jugador))) {
+      const objetivo = unidadEnemiga
+        ? { tipo: "unidad" as const, id: unidadEnemiga.id }
+        : { tipo: "edificio" as const, id: edificioObjetivo!.id };
+      this.sim.enviarOrden({ tipo: "atacar", edificioId: edificioSeleccionado.id, objetivo, jugador: this.jugadorLocal });
+      this.mostrarMarcador(cx, cy, 0xff3030);
+      return;
+    }
+
     if (unidadEnemiga || (edificioObjetivo && edificioObjetivo.jugador !== jugador)) {
       const objetivo = unidadEnemiga
         ? { tipo: "unidad" as const, id: unidadEnemiga.id }
@@ -1680,7 +2175,7 @@ export class EscenaJuego extends Phaser.Scene {
       for (const id of ids) {
         this.sim.enviarOrden({ tipo: "atacar", unidadId: id, objetivo, jugador: this.jugadorLocal });
       }
-      this.mostrarMarcador(cx, cy);
+      this.mostrarMarcador(cx, cy, 0xff3030);
       return;
     }
 
@@ -1780,6 +2275,18 @@ export class EscenaJuego extends Phaser.Scene {
         pedirMover(id, d.x, d.y);
       });
       this.mostrarMarcador(cx, cy);
+      return;
+    }
+
+    if (this.sim.mapa.getRecurso(cx, cy) === Recurso.Flor && this.sim.mapa.getCantidad(cx, cy) > 0) {
+      const idsNoPulgones = ids.filter((id) => !idsPulgonesAsignados.has(id) && !pulgonesSeleccionados.some((u) => u.id === id));
+      const destinos = this.celdasDestino(cx, cy, idsNoPulgones.length);
+      destinos.forEach((d, i) => {
+        const id = idsNoPulgones[i];
+        if (id === undefined) return;
+        pedirMover(id, d.x, d.y);
+      });
+      this.mostrarMarcador(cx, cy, 0x00ff88);
       return;
     }
 
@@ -1895,8 +2402,9 @@ export class EscenaJuego extends Phaser.Scene {
     this.mostrarMarcador(pulgonClic.x, pulgonClic.y);
   }
 
-  // Marcador de destino: cuatro "píxeles" que se cierran hacia el centro
-  private mostrarMarcador(cx: number, cy: number): void {
+  // Marcador de destino: cuatro "píxeles" que se cierran hacia el centro.
+  // Verde por defecto (mover, curar, reparar, etc.), rojo solo para ataque real.
+  private mostrarMarcador(cx: number, cy: number, color: number = 0x2ecc71): void {
     const centroX = cx * TAM + TAM / 2;
     const centroY = cy * TAM + TAM / 2;
     const esquinas = [
@@ -1916,7 +2424,7 @@ export class EscenaJuego extends Phaser.Scene {
       const r = this.marcadoresPool[idx];
       r
         .setPosition(centroX + sx * 12, centroY + sy * 12)
-        .setFillStyle(0xff3030)
+        .setFillStyle(color)
         .setAlpha(1)
         .setVisible(true);
       this.tweens.add({
@@ -2110,22 +2618,31 @@ export class EscenaJuego extends Phaser.Scene {
       const bx = btn.x - btn.width / 2;
       const by = btn.y - btn.height / 2;
       if (x >= bx && x <= bx + btn.width && y >= by && y <= by + btn.height) {
+        const accion = this.accionesBotonesActuales[i]?.accion;
+        if (accion === "borrarEdificio") {
+          this.eliminarEdificioEnConstruccionSeleccionado();
+          return;
+        }
+
         const unidadesSeleccionadas = this.sim.unidades.filter((u) => this.seleccionadas.has(u.id));
         if (unidadesSeleccionadas.length > 0) {
-          const accion = this.accionesBotonesActuales[i]?.accion;
-          const guerreraSeleccionada = unidadesSeleccionadas.find((u) => u.tipo === TipoUnidad.Guerrera && u.jugador === this.jugadorLocal);
           if (accion === "ataque") {
-            this.modoAtaque = this.hayUnidadSeleccionadaQuePuedeAtacar();
+            this.modoAtaque = this.hayUnidadSeleccionadaQuePuedeAtacar() || this.hayEdificioSeleccionadoQuePuedeAtacar();
             this.modoCuracion = false;
             this.modoReparacionEdificio = false;
             this.modoDomesticar = false;
             this.modoLlevarCadaver = false;
+            this.modoConstruccion = null;
+            this.limpiarBotonesConstruccion();
           } else if (accion === "llevarCadaver") {
             this.modoAtaque = false;
             this.modoCuracion = false;
             this.modoReparacionEdificio = false;
             this.modoDomesticar = false;
-            this.modoLlevarCadaver = (guerreraSeleccionada?.cadaverCargado ?? null) !== null;
+            this.modoLlevarCadaver = true;
+            this.modoConstruccion = null;
+            this.limpiarBotonesConstruccion();
+            this.actualizarCursorModoSeleccion();
             this.actualizarBotonesModo();
             return;
           } else if (accion === "domesticar") {
@@ -2134,6 +2651,9 @@ export class EscenaJuego extends Phaser.Scene {
             this.modoReparacionEdificio = false;
             this.modoDomesticar = true;
             this.modoLlevarCadaver = false;
+            this.modoConstruccion = null;
+            this.limpiarBotonesConstruccion();
+            this.actualizarCursorModoSeleccion();
             this.actualizarBotonesModo();
             return;
           } else if (accion === "curar") {
@@ -2142,6 +2662,9 @@ export class EscenaJuego extends Phaser.Scene {
             this.modoReparacionEdificio = false;
             this.modoDomesticar = false;
             this.modoLlevarCadaver = false;
+            this.modoConstruccion = null;
+            this.limpiarBotonesConstruccion();
+            this.actualizarCursorModoSeleccion();
             this.actualizarBotonesModo();
             return;
           } else if (accion === "reparar") {
@@ -2150,10 +2673,29 @@ export class EscenaJuego extends Phaser.Scene {
             this.modoReparacionEdificio = true;
             this.modoDomesticar = false;
             this.modoLlevarCadaver = false;
+            this.modoConstruccion = null;
+            this.limpiarBotonesConstruccion();
+            this.actualizarCursorModoSeleccion();
+            this.actualizarBotonesModo();
+            return;
+          } else if (accion === "construir") {
+            this.modoAtaque = false;
+            this.modoCuracion = false;
+            this.modoReparacionEdificio = false;
+            this.modoDomesticar = false;
+            this.modoLlevarCadaver = false;
+            this.modoConstruccion = null;
+            if (this.menuConstruccionAbierto) {
+              this.cerrarMenuConstruccion();
+            } else {
+              this.menuConstruccionAbierto = true;
+              this.limpiarBotonesAccion();
+              this.crearBotonesConstruccion(Array.from(EDIFICIOS_CONSTRUIBLES_POR_OBRERA));
+            }
             this.actualizarBotonesModo();
             return;
           }
-          this.actualizarCursorAtaque();
+          this.actualizarCursorModoSeleccion();
           this.actualizarBotonesModo();
           return;
         }
@@ -2180,64 +2722,608 @@ export class EscenaJuego extends Phaser.Scene {
 
   private claveBotones = "";
 
+  private posicionBotonHUD(indice: number): { x: number; y: number } {
+    const cols = 3;
+    const totalW = cols * BTN_W + (cols - 1) * BTN_GAP; // 246
+    const izquierda = this.scale.width - HUD_PADDING - totalW; // right edge = width - 12
+    const arriba = this.scale.height - ALTO_HUD_INFERIOR + HUD_PADDING;
+    const col = indice % cols;
+    const fila = Math.floor(indice / cols);
+    return {
+      x: izquierda + BTN_W / 2 + col * (BTN_W + BTN_GAP),
+      y: arriba + BTN_H / 2 + fila * (BTN_H + BTN_GAP),
+    };
+  }
+
+  private posicionBotonAccionHUD(indice: number): { x: number; y: number } {
+    const accionX = this.scale.width - 150;
+    const accionY = this.scale.height - ALTO_HUD_INFERIOR + 26 + indice * (ACCION_BTN_H + ACCION_BTN_GAP);
+    return { x: accionX, y: accionY };
+  }
+
+  private puedeColocarEdificioEn(x: number, y: number, tipo: number): boolean {
+    const datos = DATOS_EDIFICIO[tipo];
+    if (!datos) return false;
+    for (let dy = 0; dy < datos.alto; dy++) {
+      for (let dx = 0; dx < datos.ancho; dx++) {
+        const cx = x + dx;
+        const cy = y + dy;
+        if (!this.sim.mapa.dentro(cx, cy)) return false;
+        if (this.sim.mapa.esAgua(cx, cy) || this.sim.mapa.estaBloqueada(cx, cy)) return false;
+        const solapa = this.sim.edificios.some((ed) =>
+          cx >= ed.x &&
+          cx < ed.x + ed.ancho &&
+          cy >= ed.y &&
+          cy < ed.y + ed.alto &&
+          !(ed.tipo === tipo && ed.enConstruccion && ed.jugador === this.jugadorLocal && ed.x === x && ed.y === y && ed.ancho === datos.ancho && ed.alto === datos.alto)
+        );
+        if (solapa) return false;
+      }
+    }
+    return true;
+  }
+
+  private actualizarPreviewConstruccion(): void {
+    if (this.modoConstruccion === null) {
+      this.previewTipo = null;
+      if (this.previewConstruccion) this.previewConstruccion.setVisible(false);
+      this.previewLinea.forEach((item) => item.destroy());
+      this.previewLinea = [];
+      if (this.textoCosteLinea) this.textoCosteLinea.setVisible(false);
+      return;
+    }
+    const tipo = this.modoConstruccion;
+    const datos = DATOS_EDIFICIO[tipo];
+    if (!datos) return;
+    if (this.esConstruccionArrastrable(tipo) && this.arrastreConstruccion) {
+      const celdas = this.lineaDeConstruccion(this.arrastreConstruccion.inicio, this.arrastreConstruccion.fin);
+      this.previewLinea.forEach((item) => item.destroy());
+      this.previewLinea = [];
+      if (!this.textoCosteLinea) {
+        this.textoCosteLinea = this.add
+          .text(0, 0, "", {
+            fontFamily: 'Arial',
+            fontSize: '16px',
+            color: '#ffffff',
+            backgroundColor: '#00000088',
+            padding: { x: 6, y: 4 },
+          })
+          .setDepth(20)
+          .setVisible(false);
+        this.cameras.main.ignore(this.textoCosteLinea);
+      }
+      const coste = datos.costeArcilla ?? 0;
+      const total = celdas.length * coste;
+      const texto = `${celdas.length} celdas · ${total} arcilla`;
+      const costeValido = this.sim.stock[this.jugadorLocal].arcilla >= total;
+      this.textoCosteLinea.setText(texto).setColor(costeValido ? '#A9F0B5' : '#FF8D8D');
+      const puntero = this.input.activePointer;
+      this.textoCosteLinea.setPosition(puntero.x + 18, puntero.y - 24).setVisible(true);
+      for (let i = 0; i < celdas.length; i++) {
+        const celda = celdas[i];
+        const img = this.add.image(0, 0, this.ensureTexturaEdificio(tipo, this.jugadorLocal));
+        img
+          .setOrigin(0, 0)
+          .setDepth(4)
+          .setAlpha(0.5)
+          .setPosition(celda.x * TAM, celda.y * TAM)
+          .setDisplaySize(datos.ancho * TAM, datos.alto * TAM)
+          .setTint(this.puedeColocarEdificioEn(celda.x, celda.y, tipo) ? 0x67f0a5 : 0xff8d8d)
+          .setVisible(true);
+        this.camUI.ignore(img);
+        this.previewLinea.push(img);
+      }
+      return;
+    }
+    this.previewLinea.forEach((item) => item.destroy());
+    this.previewLinea = [];
+    if (this.textoCosteLinea) this.textoCosteLinea.setVisible(false);
+    if (!this.previewConstruccion || this.previewTipo !== tipo) {
+      this.previewTipo = tipo;
+      if (this.previewConstruccion) this.previewConstruccion.destroy();
+      this.previewConstruccion = this.add
+        .image(0, 0, this.ensureTexturaEdificio(tipo, this.jugadorLocal))
+        .setOrigin(0, 0)
+        .setDepth(4)
+        .setAlpha(0.45);
+      this.camUI.ignore(this.previewConstruccion);
+    }
+    const puntero = this.input.activePointer;
+    if (this.punteroSobreHUD(puntero.x, puntero.y)) {
+      this.previewConstruccion.setVisible(false);
+      return;
+    }
+    const mundo = this.cameras.main.getWorldPoint(puntero.x, puntero.y);
+    const x = Math.floor(mundo.x / TAM);
+    const y = Math.floor(mundo.y / TAM);
+    const valido = this.puedeColocarEdificioEn(x, y, tipo);
+    this.previewConstruccion
+      .setPosition(x * TAM, y * TAM)
+      .setDisplaySize(datos.ancho * TAM, datos.alto * TAM)
+      .setTint(valido ? 0x67f0a5 : 0xff8d8d)
+      .setAlpha(0.45)
+      .setVisible(true);
+  }
+
+  private celdaDesdePuntero(p: Phaser.Input.Pointer): { x: number; y: number } {
+    const mundo = this.cameras.main.getWorldPoint(p.x, p.y);
+    return {
+      x: Math.floor(mundo.x / TAM),
+      y: Math.floor(mundo.y / TAM),
+    };
+  }
+
+  private lineaDeConstruccion(inicio: { x: number; y: number }, fin: { x: number; y: number }): Array<{ x: number; y: number }> {
+    const dx = fin.x - inicio.x;
+    const dy = fin.y - inicio.y;
+    if (dx === 0 && dy === 0) return [inicio];
+
+    const angulo = Math.atan2(dy, dx);
+    const anguloAjustado = Math.round(angulo / (Math.PI / 4)) * (Math.PI / 4);
+    const cosAjustado = Math.cos(anguloAjustado);
+    const sinAjustado = Math.sin(anguloAjustado);
+    const sx = Math.abs(cosAjustado) < 0.5 ? 0 : (cosAjustado >= 0 ? 1 : -1);
+    const sy = Math.abs(sinAjustado) < 0.5 ? 0 : (sinAjustado >= 0 ? 1 : -1);
+    const denominador = sx * sx + sy * sy;
+    const n = Math.max(0, Math.round((dx * sx + dy * sy) / denominador));
+
+    const celdas: Array<{ x: number; y: number }> = [];
+    for (let i = 0; i <= n; i++) {
+      celdas.push({ x: inicio.x + i * sx, y: inicio.y + i * sy });
+    }
+    return celdas.slice(0, MAX_CELDAS_ARRASTRE);
+  }
+
+  private limpiarBotonesConstruccion(): void {
+    this.ocultarTooltipBoton();
+    this.tiposBotonesConstruccion = [];
+    for (const b of this.botonesConstruccion) b.destroy();
+    for (const t of this.textosBotonConstruccion) t.destroy();
+    for (const r of this.subrayadosBotonConstruccion) r.destroy();
+    this.subrayadosBotonConstruccion = [];
+    for (const item of this.textosCostoConstruccion) item.texto.destroy();
+    this.botonesConstruccion = [];
+    this.textosBotonConstruccion = [];
+    this.textosCostoConstruccion = [];
+  }
+
   private limpiarBotonesAccion(): void {
+    this.ocultarTooltipBoton();
     this.claveBotones = "";
     this.accionesBotonesActuales = [];
     for (const b of this.botonesAccion) b.destroy();
     for (const t of this.textosBotonAccion) t.destroy();
+    for (const r of this.subrayadosBotonAccion) r.destroy();
+    this.subrayadosBotonAccion = [];
+    for (const item of this.textosCostoAccion) item.texto.destroy();
     this.botonesAccion = [];
     this.textosBotonAccion = [];
+    this.textosCostoAccion = [];
   }
 
-  private crearBotonesAccion(etiquetas: string[]): void {
-    const clave = etiquetas.join("|");
-    if (clave === this.claveBotones && this.botonesAccion.length > 0) return; // ya están creados
-    this.limpiarBotonesAccion();
-    this.claveBotones = clave;
-    this.accionesBotonesActuales = etiquetas.map((label) => {
-      const accion =
-        label === "Attack" ? "ataque" :
-        label === "Tame" ? "domesticar" :
-        label === "Cure Disease" ? "curar" :
-        label === "Repair Building" ? "reparar" :
-        label === "Carry Corpse" || label === "Leave Corpse" ? "llevarCadaver" : "";
-      return { label, accion };
+  private listarCostesRecurso(coste?: { agua?: number; arcilla?: number; nectar?: number; costeAgua?: number; costeArcilla?: number; costeNectar?: number }): Array<{ etiqueta: string; valor: number; recurso: "agua" | "arcilla" | "nectar" }> {
+    const agua = coste?.agua ?? coste?.costeAgua ?? 0;
+    const arcilla = coste?.arcilla ?? coste?.costeArcilla ?? 0;
+    const nectar = coste?.nectar ?? coste?.costeNectar ?? 0;
+    return [
+      { etiqueta: "Agua", valor: agua, recurso: "agua" as const },
+      { etiqueta: "Arcilla", valor: arcilla, recurso: "arcilla" as const },
+      { etiqueta: "Néctar", valor: nectar, recurso: "nectar" as const },
+    ].filter((item) => item.valor > 0);
+  }
+
+  private refrescarColoresCosto(): void {
+    const stock = this.sim.stock[this.jugadorLocal];
+    for (const item of [...this.textosCostoAccion, ...this.textosCostoConstruccion]) {
+      const color = item.recurso === "agua"
+        ? (stock.agua >= item.valor ? "#4aa8ff" : "#ff5555")
+        : item.recurso === "arcilla"
+          ? (stock.arcilla >= item.valor ? "#ffd23f" : "#ff5555")
+          : (stock.nectar >= item.valor ? "#ff69b4" : "#ff5555");
+      item.texto.setColor(color);
+    }
+  }
+
+  // Mide texto con la misma tipografía que un Phaser.Text (para calcular el subrayado).
+  private medirTexto(ref: Phaser.GameObjects.Text, cadena: string): number {
+    if (!this.ctxMedicionTexto) {
+      this.ctxMedicionTexto = document.createElement("canvas").getContext("2d");
+    }
+    const ctx = this.ctxMedicionTexto;
+    if (!ctx) return 0;
+    ctx.font = `${ref.style.fontStyle} ${ref.style.fontSize} ${ref.style.fontFamily}`;
+    return ctx.measureText(cadena).width;
+  }
+
+  // Subraya la primera aparición de `tecla` en el texto del botón (funciona con texto
+  // centrado y también si el texto se parte en varias líneas).
+  private crearSubrayadoHotkey(texto: Phaser.GameObjects.Text, tecla: string): Phaser.GameObjects.Rectangle | null {
+    const lineas = texto.getWrappedText(texto.text);
+    const letra = tecla.toLowerCase();
+    for (let li = 0; li < lineas.length; li++) {
+      const ci = lineas[li].toLowerCase().indexOf(letra);
+      if (ci < 0) continue;
+      const anchoLinea = this.medirTexto(texto, lineas[li]);
+      const antes = this.medirTexto(texto, lineas[li].slice(0, ci));
+      const anchoLetra = this.medirTexto(texto, lineas[li][ci]);
+      const altoLinea = texto.height / lineas.length;
+      const xLetra = texto.x - anchoLinea / 2 + antes + anchoLetra / 2;
+      const yLinea = texto.y - texto.height / 2 + (li + 1) * altoLinea - 3;
+      return this.add.rectangle(xLetra, yLinea, anchoLetra, 2, 0xffffff, 1).setDepth(15);
+    }
+    return null;
+  }
+
+  private descripcionTooltipBoton(label: string): string {
+    const texto = label.trim();
+    switch (texto) {
+      case "Attack": return "Attack nearby enemies and deal damage in combat.";
+      case "Build": return "Construct structures for unit creation, economy, etc.";
+      case "Tame": return "Calm wild units and recruit them to your side.";
+      case "Cure Disease": return "Remove viral infection from affected units.";
+      case "Repair Building": return "Restore damaged structures and keep them operational.";
+      case "Delete building": return "Cancel construction and refund half the resource cost.";
+      case "Ant Worker": return "Train a worker that gathers resources and builds.";
+      case "Guerrera": return "Train a ground warrior.";
+      case "Voladora": return "Train a flying scout.";
+      case "G. Voladora": return "Train a flying warrior.";
+      case "Carry Corpse": return "Pick up a corpse and bring it to safety.";
+      case "Leave Corpse": return "Drop the carried corpse in the current area.";
+      case "Back": return "Return to the previous build menu.";
+      default: return texto;
+    }
+  }
+
+  private descripcionTooltipEdificio(tipo: number): string {
+    if (tipo === -1) return "Return to the previous build menu.";
+    const datos = DATOS_EDIFICIO[tipo];
+    return datos?.descripcion ?? "Build this structure to support the colony.";
+  }
+
+  private ocultarTooltipBoton(): void {
+    if (this.tooltipTimer) {
+      this.tooltipTimer.remove(false);
+      this.tooltipTimer = undefined;
+    }
+    if (this.tooltipHUD) {
+      this.tooltipHUD.setVisible(false).setText("");
+    }
+  }
+
+  private mostrarTooltipBoton(texto: string, px: number, py: number): void {
+    if (!this.tooltipHUD) {
+      this.tooltipHUD = this.add.text(0, 0, "", {
+        color: "#f7f9ff",
+        backgroundColor: "#111827CC",
+        padding: { x: 8, y: 4 },
+        fontSize: "12px",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 2,
+        wordWrap: { width: 260 },
+        resolution: 2,
+      }).setDepth(2000).setVisible(false).setOrigin(1, 0.5);
+      this.cameras.main.ignore(this.tooltipHUD);
+    }
+    this.tooltipHUD.setText(texto);
+    this.posicionarTooltip(px, py);
+    this.tooltipHUD.setVisible(true);
+  }
+
+  // Left of the cursor, always inside the screen.
+  private posicionarTooltip(px: number, py: number): void {
+    const t = this.tooltipHUD;
+    if (!t) return;
+    const margen = 4;
+    const x = Math.max(t.width + margen, px - 16);
+    const y = Phaser.Math.Clamp(
+      py - 18,
+      t.height / 2 + margen,
+      this.scale.height - t.height / 2 - margen
+    );
+    t.setPosition(x, y);
+  }
+
+  private registrarTooltipBoton(bg: Phaser.GameObjects.Rectangle, texto: string): void {
+    bg.on("pointerover", () => {
+      this.ocultarTooltipBoton();
+      this.tooltipTimer = this.time.delayedCall(1500, () => {
+        const p = this.input.activePointer;
+        this.mostrarTooltipBoton(texto, p.x, p.y);
+      });
     });
-    const sh = this.scale.height;
-    const queueX = this.scale.width - 260;
-    const tamBtn = 46;
-    const espX = 10;
-    const espY = 10;
-    const gridWidth = 3 * tamBtn + 2 * espX;
-    const startX = queueX - gridWidth - 22;
-    const startY = sh - 94;
+    bg.on("pointermove", (pointer: Phaser.Input.Pointer) => {
+      if (this.tooltipHUD?.visible) this.posicionarTooltip(pointer.x, pointer.y);
+    });
+    bg.on("pointerout", () => this.ocultarTooltipBoton());
+    bg.on("pointerdown", () => this.ocultarTooltipBoton());
+  }
 
-    for (let i = 0; i < etiquetas.length; i++) {
-      const col = i % 3;
-      const fila = Math.floor(i / 3);
-      const x = startX + col * (tamBtn + espX);
-      const y = startY + fila * (tamBtn + espY);
+  // Todo el contenido del botón (nombre + costes) queda centrado dentro del propio botón,
+  // tanto horizontal como verticalmente.
+  private crearBotonConCosto(
+    x: number,
+    y: number,
+    nombre: string,
+    coste?: { agua?: number; arcilla?: number; nectar?: number; costeAgua?: number; costeArcilla?: number; costeNectar?: number },
+    stock?: { agua: number; arcilla: number; nectar: number },
+    costoTarget: Array<{ texto: Phaser.GameObjects.Text; recurso: "agua" | "arcilla" | "nectar"; valor: number }> = [],
+    ancho = BTN_W,
+    alto = BTN_H,
+    costeStepY = 13,
+    costesEnLinea = false,
+    separacionNombreCoste = 5,
+    hotkey?: string
+  ): {
+    bg: Phaser.GameObjects.Rectangle;
+    textoNombre: Phaser.GameObjects.Text;
+    textosCoste: Phaser.GameObjects.Text[];
+    subrayado: Phaser.GameObjects.Rectangle | null;
+  } {
+    const bg = this.add
+      .rectangle(x, y, ancho, alto, 0x2a3a5a, 1)
+      .setInteractive()
+      .setDepth(13)
+      .setStrokeStyle(1, 0x5a7ca5);
+    bg.on("pointerover", () => bg.setFillStyle(0x3b527e));
+    bg.on("pointerout", () => this.actualizarBotonesModo());
 
-      const bg = this.add
-        .rectangle(x, y, tamBtn, tamBtn, 0x2a3a5a, 1)
-        .setInteractive()
-        .setDepth(13);
-      bg.setStrokeStyle(1, 0x5a7ca5);
+    const textoNombre = this.add
+      .text(x, y, nombre, {
+        color: "#ffffff",
+        fontSize: "14px",
+        fontStyle: "bold",
+        align: "center",
+        wordWrap: { width: ancho - 8 },
+        resolution: 2,
+      })
+      .setOrigin(0.5, 0.5)
+      .setDepth(14);
 
-      // Animaciones de hover y click en botones
-      bg.on("pointerover", () => bg.setFillStyle(0x3b527e));
-      bg.on("pointerout", () => this.actualizarBotonesModo());
-      bg.on("pointerdown", () => bg.setScale(0.96));
-      bg.on("pointerup", () => bg.setScale(1));
-
-      const txt = this.add
-        .text(x, y, etiquetas[i], { color: "#ffffff", fontSize: "9px", align: "center", wordWrap: { width: tamBtn - 8 } })
+    const textosCoste: Phaser.GameObjects.Text[] = [];
+    const costes = this.listarCostesRecurso(coste ?? { agua: 0, arcilla: 0, nectar: 0 });
+    for (let i = 0; i < costes.length; i++) {
+      const item = costes[i];
+      const color = item.recurso === "agua" ? "#4aa8ff" : item.recurso === "arcilla" ? "#ffd23f" : "#ff69b4";
+      const text = this.add
+        .text(x, y, `${item.valor} ${item.etiqueta}`, {
+          color: stock && (item.recurso === "agua" ? stock.agua : item.recurso === "arcilla" ? stock.arcilla : stock.nectar) < item.valor ? "#ff5555" : color,
+          fontSize: "10px",
+          fontStyle: "bold",
+          align: "center",
+          resolution: 2,
+        })
         .setOrigin(0.5, 0.5)
         .setDepth(14);
+      textosCoste.push(text);
+      costoTarget.push({ texto: text, recurso: item.recurso, valor: item.valor });
+    }
 
-      this.botonesAccion.push(bg);
-      this.textosBotonAccion.push(txt);
-      this.cameras.main.ignore([bg, txt]);
+    // Bloque vertical: nombre + (separación) + costes, centrado en el botón.
+    const altoNombre = textoNombre.height;
+    const altoCoste = textosCoste.length > 0 ? textosCoste[0].height : 0;
+    const filasCoste = textosCoste.length === 0 ? 0 : costesEnLinea ? 1 : textosCoste.length;
+    const altoCostes = filasCoste === 0 ? 0 : (filasCoste - 1) * costeStepY + altoCoste;
+    const separacion = filasCoste === 0 ? 0 : separacionNombreCoste;
+    const altoTotal = altoNombre + separacion + altoCostes;
+    const arriba = y - altoTotal / 2;
+    textoNombre.setY(arriba + altoNombre / 2);
+    for (let i = 0; i < textosCoste.length; i++) {
+      const fila = costesEnLinea ? 0 : i;
+      textosCoste[i].setY(arriba + altoNombre + separacion + altoCoste / 2 + fila * costeStepY);
+    }
+
+    // Costes en una sola línea: se colocan uno al lado del otro y el conjunto queda centrado.
+    if (costesEnLinea && textosCoste.length > 0) {
+      const hueco = 10;
+      const total = textosCoste.reduce((acc, t) => acc + t.width, 0) + hueco * (textosCoste.length - 1);
+      let cursor = x - total / 2;
+      for (const t of textosCoste) {
+        t.setOrigin(0, 0.5).setX(cursor);
+        cursor += t.width + hueco;
+      }
+    }
+
+    const subrayado = hotkey ? this.crearSubrayadoHotkey(textoNombre, hotkey) : null;
+    return { bg, textoNombre, textosCoste, subrayado };
+  }
+
+  // Misma lógica que el clic en un botón de edificio del menú de construcción.
+  private elegirEdificioParaConstruir(tipo: number): void {
+    this.modoConstruccion = tipo;
+    this.modoAtaque = false;
+    this.modoCuracion = false;
+    this.modoReparacionEdificio = false;
+    this.modoDomesticar = false;
+    this.modoLlevarCadaver = false;
+    this.menuConstruccionAbierto = true;
+    this.pointerDownEnHUD = false;
+    this.clicConsumidoPorHUD = false;
+    this.actualizarBotonesModo();
+    this.actualizarPreviewConstruccion();
+  }
+
+  // Hotkeys de los botones del HUD. Con el menú de construcción abierto solo valen las
+  // teclas de los edificios (P/T/D/M); si no, las de los botones de acción.
+  // La tecla A la sigue gestionando `teclaAtaque` en update().
+  private manejarHotkeyBotones(ev: KeyboardEvent): void {
+    if (ev.repeat || ev.ctrlKey || ev.altKey || ev.metaKey) return;
+    if (ev.key.length !== 1) return;
+    const tecla = ev.key.toUpperCase();
+
+    if (this.botonesConstruccion.length > 0) {
+      const i = this.tiposBotonesConstruccion.findIndex((t) => HOTKEY_EDIFICIO[t] === tecla);
+      if (i < 0) return;
+      this.pulsoBoton(this.botonesConstruccion[i], this.textosBotonConstruccion[i]);
+      this.elegirEdificioParaConstruir(this.tiposBotonesConstruccion[i]);
+      return;
+    }
+
+    if (tecla === "A") return;
+    const i = this.accionesBotonesActuales.findIndex((a) => HOTKEY_ACCION[a.label] === tecla);
+    if (i < 0) return;
+    const btn = this.botonesAccion[i];
+    if (!btn) return;
+    this.pulsoBoton(btn, this.textosBotonAccion[i]);
+    this.comprobarClicBotonesAccion(btn.x, btn.y);
+  }
+
+  private pulsoBoton(bg: Phaser.GameObjects.Rectangle, texto?: Phaser.GameObjects.Text): void {
+    this.tweens.add({
+      targets: texto ? [bg, texto] : [bg],
+      scaleX: 0.95,
+      scaleY: 0.95,
+      duration: 60,
+      yoyo: true,
+      ease: "Quad.easeOut",
+    });
+  }
+
+  private textoBotonEdificio(tipo: number): string {
+    if (tipo === -1) return "Back";
+    const datos = DATOS_EDIFICIO[tipo];
+    return datos?.etiqueta ?? `E${tipo}`;
+  }
+
+  private crearBotonesConstruccion(edificios: number[]): void {
+    this.limpiarBotonesConstruccion();
+    const tipos = [...edificios, -1];
+    for (let i = 0; i < tipos.length; i++) {
+      const tipo = tipos[i];
+      const esBack = tipo === -1;
+      const { x, y } = this.posicionBotonHUD(i);
+      const boton = this.crearBotonConCosto(
+        x,
+        y,
+        esBack ? "Back" : this.textoBotonEdificio(tipo),
+        esBack ? undefined : DATOS_EDIFICIO[tipo],
+        this.sim.stock[this.jugadorLocal],
+        this.textosCostoConstruccion,
+        BTN_W,
+        BTN_H,
+        13,
+        false,
+        5,
+        esBack ? undefined : HOTKEY_EDIFICIO[tipo]
+      );
+      boton.bg.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+        pointer.event.stopPropagation?.();
+        this.clicConsumidoPorHUD = true;
+        this.pointerDownEnHUD = true;
+        boton.bg.setScale(0.96);
+        if (esBack) {
+          this.cerrarMenuConstruccion();
+          return;
+        }
+        this.elegirEdificioParaConstruir(tipo);
+      });
+      boton.bg.on("pointerup", (pointer: Phaser.Input.Pointer) => {
+        pointer.event.stopPropagation?.();
+        boton.bg.setScale(1);
+      });
+      this.registrarTooltipBoton(boton.bg, this.descripcionTooltipEdificio(tipo));
+      this.tiposBotonesConstruccion.push(tipo);
+      this.botonesConstruccion.push(boton.bg);
+      this.textosBotonConstruccion.push(boton.textoNombre);
+      const extrasC = boton.subrayado ? [boton.subrayado] : [];
+      if (boton.subrayado) this.subrayadosBotonConstruccion.push(boton.subrayado);
+      this.cameras.main.ignore([boton.bg, boton.textoNombre, ...boton.textosCoste, ...extrasC]);
+    }
+    this.actualizarBotonesModo();
+  }
+
+  private eliminarEdificioEnConstruccionSeleccionado(): void {
+    const edificio = this.seleccionadaEdificio !== null ? this.buildingById.get(this.seleccionadaEdificio) : undefined;
+    if (!edificio || !edificio.enConstruccion) {
+      this.mostrarMensajeError("Only buildings under construction can be deleted.");
+      return;
+    }
+
+    const datos = DATOS_EDIFICIO[edificio.tipo];
+    const reembolso = {
+      agua: Math.floor((datos?.costeAgua ?? 0) / 2),
+      arcilla: Math.floor((datos?.costeArcilla ?? 0) / 2),
+      nectar: Math.floor((datos?.costeNectar ?? 0) / 2),
+    };
+
+    const stock = this.sim.stock[edificio.jugador];
+    stock.agua += reembolso.agua;
+    stock.arcilla += reembolso.arcilla;
+    stock.nectar += reembolso.nectar;
+
+    for (let y = 0; y < edificio.alto; y++) {
+      for (let x = 0; x < edificio.ancho; x++) {
+        this.sim.mapa.setBloqueada(edificio.x + x, edificio.y + y, false);
+      }
+    }
+
+    const indice = this.sim.edificios.findIndex((e) => e.id === edificio.id);
+    if (indice >= 0) this.sim.edificios.splice(indice, 1);
+    this.rebuildLiveIndexes();
+
+    this.seleccionadaEdificio = null;
+    this.panelDirty = true;
+    this.limpiarBotonesAccion();
+    this.actualizarFondoHudPorSeleccion();
+    this.dibujarEdificios();
+    this.mostrarMensajeError(`Building deleted. ${reembolso.agua + reembolso.arcilla + reembolso.nectar > 0 ? "Resources refunded." : "No resources refunded."}`);
+  }
+
+  private crearBotonesAccion(etiquetas: Array<string | { label: string; costes?: { agua?: number; arcilla?: number; nectar?: number } }>): void {
+    if (this.menuConstruccionAbierto) {
+      if (this.botonesAccion.length > 0) this.limpiarBotonesAccion();
+      return;
+    }
+    const stock = this.sim.stock[this.jugadorLocal];
+    const items = etiquetas.map((item) => {
+      const label = typeof item === "string" ? item : item.label;
+      const coste = typeof item === "string" ? { agua: 0, arcilla: 0, nectar: 0 } : { agua: item.costes?.agua ?? 0, arcilla: item.costes?.arcilla ?? 0, nectar: item.costes?.nectar ?? 0 };
+      const puedePagar = {
+        agua: stock.agua >= (coste.agua ?? 0),
+        arcilla: stock.arcilla >= (coste.arcilla ?? 0),
+        nectar: stock.nectar >= (coste.nectar ?? 0),
+      };
+      return { label, coste, accion: label === "Attack" ? "ataque" : label === "Tame" ? "domesticar" : label === "Cure Disease" ? "curar" : label === "Repair Building" ? "reparar" : label === "Build" ? "construir" : label === "Delete building" ? "borrarEdificio" : label === "Carry Corpse" || label === "Leave Corpse" ? "llevarCadaver" : "", puedePagar };
+    });
+    const clave = JSON.stringify(items.map((item) => ({ label: item.label, coste: item.coste, puedePagar: item.puedePagar })));
+    if (clave === this.claveBotones && this.botonesAccion.length > 0) return;
+    this.limpiarBotonesAccion();
+    this.claveBotones = clave;
+    this.accionesBotonesActuales = items.map((item) => ({ label: item.label, accion: item.accion }));
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const { x, y } = this.posicionBotonAccionHUD(i);
+      const boton = this.crearBotonConCosto(
+        x,
+        y,
+        item.label,
+        item.coste,
+        stock,
+        this.textosCostoAccion,
+        ACCION_BTN_W,
+        ACCION_BTN_H,
+        0,
+        true, // costes en una línea
+        3, // separación entre el nombre y los costes
+        HOTKEY_ACCION[item.label]
+      );
+      boton.bg.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+        pointer.event.stopPropagation?.();
+        this.clicConsumidoPorHUD = true;
+        this.pointerDownEnHUD = true;
+        boton.bg.setScale(0.96);
+        this.comprobarClicBotonesAccion(boton.bg.x, boton.bg.y);
+      });
+      boton.bg.on("pointerup", (pointer: Phaser.Input.Pointer) => {
+        pointer.event.stopPropagation?.();
+        boton.bg.setScale(1);
+      });
+      this.registrarTooltipBoton(boton.bg, this.descripcionTooltipBoton(item.label));
+      this.botonesAccion.push(boton.bg);
+      this.textosBotonAccion.push(boton.textoNombre);
+      const extrasA = boton.subrayado ? [boton.subrayado] : [];
+      if (boton.subrayado) this.subrayadosBotonAccion.push(boton.subrayado);
+      this.cameras.main.ignore([boton.bg, boton.textoNombre, ...boton.textosCoste, ...extrasA]);
     }
     this.actualizarBotonesModo();
   }
@@ -2246,12 +3332,93 @@ export class EscenaJuego extends Phaser.Scene {
     for (let i = 0; i < this.botonesAccion.length; i++) {
       const texto = this.textosBotonAccion[i]?.text ?? "";
       const modoActivo =
-        (i === 0 && this.modoAtaque) ||
-        (i === 1 && this.modoCuracion) ||
+        (this.modoAtaque && texto === "Attack") ||
+        (this.modoCuracion && texto === "Cure Disease") ||
         (this.modoReparacionEdificio && texto === "Repair Building") ||
         (this.modoDomesticar && texto === "Tame") ||
+        (this.modoConstruccion !== null && texto === "Build") ||
         (this.modoLlevarCadaver && (texto === "Carry Corpse" || texto === "Leave Corpse"));
       this.botonesAccion[i].setFillStyle(modoActivo ? 0x4c78b8 : 0x2a3a5a);
+    }
+    for (let i = 0; i < this.botonesConstruccion.length; i++) {
+      const tipo = this.tiposBotonesConstruccion[i];
+      const activo = tipo !== undefined && tipo !== -1 && this.modoConstruccion === tipo;
+      this.botonesConstruccion[i].setFillStyle(activo ? 0x4c78b8 : 0x2a3a5a);
+    }
+  }
+
+  private actualizarSeleccionEdificio(ahora: number): void {
+    const seleccionado = this.seleccionadaEdificio !== null ? this.buildingById.get(this.seleccionadaEdificio) : undefined;
+    if (!seleccionado) {
+      this.graficoSeleccionEdificio.clear();
+      this.brilloSeleccionEdificio.setVisible(false);
+      return;
+    }
+
+    const x = seleccionado.x * TAM;
+    const y = seleccionado.y * TAM;
+    const w = seleccionado.ancho * TAM;
+    const h = seleccionado.alto * TAM;
+    const color = seleccionado.enConstruccion ? 0x9aa0a6 : 0xffde59;
+    const glow = 0.18 + (0.5 + 0.5 * Math.sin(ahora * 0.007)) * 0.22;
+
+    this.brilloSeleccionEdificio
+      .setTexture(this.ensureTexturaEdificio(seleccionado.tipo, seleccionado.jugador))
+      .setPosition(x, y)
+      .setOrigin(0, 0)
+      .setDisplaySize(w, h)
+      .setAlpha(glow)
+      .setVisible(true);
+
+    this.graficoSeleccionEdificio.clear();
+    this.graficoSeleccionEdificio.fillStyle(color, 0.12 + 0.12 * Math.sin(ahora * 0.008));
+    for (let ty = 0; ty < seleccionado.alto; ty++) {
+      for (let tx = 0; tx < seleccionado.ancho; tx++) {
+        const forma = FORMAS_EDIFICIO[seleccionado.tipo] ?? [[0, 0, 1, 1]];
+        const dentro = forma.some(([x0, y0, x1, y1]) => {
+          const bx0 = tx / seleccionado.ancho;
+          const bx1 = (tx + 1) / seleccionado.ancho;
+          const by0 = ty / seleccionado.alto;
+          const by1 = (ty + 1) / seleccionado.alto;
+          return Math.max(bx0, x0) <= Math.min(bx1, x1) && Math.max(by0, y0) <= Math.min(by1, y1);
+        });
+        if (!dentro) continue;
+        const px = x + tx * TAM;
+        const py = y + ty * TAM;
+        this.graficoSeleccionEdificio.fillRect(px + 2, py + 2, TAM - 4, TAM - 4);
+      }
+    }
+
+    this.graficoSeleccionEdificio.lineStyle(2, color, 1);
+    this.graficoSeleccionEdificio.strokeRect(x - 2, y - 2, w + 4, h + 4);
+
+    const notch = 4;
+    this.graficoSeleccionEdificio.fillStyle(color, 1);
+    for (let i = 1; i < seleccionado.ancho; i++) {
+      const px = x + i * TAM;
+      this.graficoSeleccionEdificio.fillRect(px - notch / 2, y - 2, notch, notch);
+      this.graficoSeleccionEdificio.fillRect(px - notch / 2, y + h - notch + 2, notch, notch);
+    }
+    for (let i = 1; i < seleccionado.alto; i++) {
+      const py = y + i * TAM;
+      this.graficoSeleccionEdificio.fillRect(x - 2, py - notch / 2, notch, notch);
+      this.graficoSeleccionEdificio.fillRect(x + w - notch + 2, py - notch / 2, notch, notch);
+    }
+
+    const corner = Math.min(10, w * 0.18, h * 0.18);
+    const corners = [
+      { x: x - 2, y: y - 2, dx: 1, dy: 1 },
+      { x: x + w + 2, y: y - 2, dx: -1, dy: 1 },
+      { x: x - 2, y: y + h + 2, dx: 1, dy: -1 },
+      { x: x + w + 2, y: y + h + 2, dx: -1, dy: -1 },
+    ];
+    for (const cornerInfo of corners) {
+      this.graficoSeleccionEdificio.beginPath();
+      this.graficoSeleccionEdificio.moveTo(cornerInfo.x + (cornerInfo.dx > 0 ? 0 : -corner), cornerInfo.y + (cornerInfo.dy > 0 ? 0 : -corner));
+      this.graficoSeleccionEdificio.lineTo(cornerInfo.x + (cornerInfo.dx > 0 ? corner : -corner), cornerInfo.y + (cornerInfo.dy > 0 ? 0 : -corner));
+      this.graficoSeleccionEdificio.moveTo(cornerInfo.x + (cornerInfo.dx > 0 ? 0 : -corner), cornerInfo.y + (cornerInfo.dy > 0 ? 0 : -corner));
+      this.graficoSeleccionEdificio.lineTo(cornerInfo.x + (cornerInfo.dx > 0 ? 0 : -corner), cornerInfo.y + (cornerInfo.dy > 0 ? corner : -corner));
+      this.graficoSeleccionEdificio.strokePath();
     }
   }
 
@@ -2268,29 +3435,6 @@ export class EscenaJuego extends Phaser.Scene {
       .setVisible(true);
   }
 
-  private actualizarColaProduccionHUD(): void {
-    const edificio = this.seleccionadaEdificio !== null ? this.buildingById.get(this.seleccionadaEdificio) : undefined;
-    const cola = edificio?.cola ?? [];
-
-    if (!edificio || cola.length === 0) {
-      this.textoColaProduccion.setVisible(false);
-      return;
-    }
-
-    const lineas = cola.slice(0, 5).map((item, index) => {
-      const nombre = item.esUnidad
-        ? DATOS_UNIDAD[item.tipo]?.nombre ?? `U${item.tipo}`
-        : NOMBRES_EDIFICIO[item.tipo] ?? `E${item.tipo}`;
-      const duracion = Math.max(1, Math.ceil(item.ticksRestantes / TICKS_POR_SEGUNDO));
-      return `${index + 1}. ${nombre} (${duracion}s)`;
-    });
-
-    this.textoColaProduccion
-      .setText(`Producción\n${lineas.join("\n")}`)
-      .setVisible(true);
-  }
-
-
   // Texto del panel: unidad seleccionada > edificio seleccionado > edificio de la celda > celda
   private bonusRegenAura(u: Unidad): number {
     return this.sim.unidades.filter((v) =>
@@ -2300,6 +3444,176 @@ export class EscenaJuego extends Phaser.Scene {
       v.jugador === u.jugador &&
       Math.max(Math.abs(v.x - u.x), Math.abs(v.y - u.y)) <= 1
     ).length * 1.0;
+  }
+
+  // La lista de producción va SIEMPRE a la izquierda de la columna de botones de unidades.
+  // Se calcula a partir de los límites reales de esa columna, así nunca se solapan.
+  private geometriaColaProduccion(): { left: number; ancho: number } {
+    const columnaAccionIzq = this.posicionBotonAccionHUD(0).x - ACCION_BTN_W / 2;
+    const derecha = columnaAccionIzq - COLA_GAP_A_ACCIONES;
+    const limiteIzq = Math.max(120, this.scale.width / 2 + 120); // no invadir el panel de info central
+    const ancho = Math.max(COLA_BTN_W_MIN, Math.min(COLA_BTN_W, derecha - limiteIzq));
+    return { left: derecha - ancho, ancho };
+  }
+
+  private limpiarColaProduccionHUD(): void {
+    this.ocultarTooltipBoton();
+    for (const fila of this.filasColaProduccion) {
+      this.tweens.killTweensOf([fila.bg, fila.progreso, fila.texto, fila.cruz]);
+      fila.bg.destroy();
+      fila.progreso.destroy();
+      fila.texto.destroy();
+      fila.cruz.destroy();
+    }
+    this.filasColaProduccion = [];
+    this.botonesColaProduccion = [];
+    this.claveColaProduccion = "";
+  }
+
+  private actualizarColaProduccionHUD(): void {
+    const edificio = this.sim.edificios.find((e) => e.id === this.seleccionadaEdificio);
+    if (!edificio || edificio.cola.length === 0) {
+      if (this.filasColaProduccion.length > 0) this.limpiarColaProduccionHUD();
+      this.textoColaProduccion.setText("").setVisible(false);
+      return;
+    }
+
+    const { left, ancho } = this.geometriaColaProduccion();
+    this.anchoColaActual = ancho;
+    const top = this.scale.height - ALTO_HUD_INFERIOR + 12;
+    this.textoColaProduccion
+      .setPosition(left, top)
+      .setWordWrapWidth(ancho)
+      .setText("Producción:")
+      .setVisible(true);
+
+    // Máx. 8 ítems en cola: se muestran todos para poder cancelar cualquiera.
+    const colaVisible = edificio.cola.slice(0, 8);
+    const clave = `${edificio.id}|${left}|${ancho}|${top}|` + colaVisible.map((it) => `${it.id ?? "x"}:${it.esUnidad ? "u" : "e"}${it.tipo}`).join(",");
+
+    // La lista solo se reconstruye si cambia la cola. Antes se destruía en cada frame,
+    // lo que impedía cualquier animación hover. Mientras no cambie, solo se refrescan
+    // el tiempo restante y la barra de progreso.
+    if (clave !== this.claveColaProduccion) {
+      this.limpiarColaProduccionHUD();
+      this.claveColaProduccion = clave;
+      for (let i = 0; i < colaVisible.length; i++) {
+        this.crearFilaColaProduccion(edificio.id, colaVisible[i], left, top + 26 + i * COLA_BTN_PASO);
+      }
+    }
+
+    for (let i = 0; i < this.filasColaProduccion.length; i++) {
+      const item = colaVisible[i];
+      const fila = this.filasColaProduccion[i];
+      if (!item) continue;
+      const seg = Math.max(0, Math.ceil(item.ticksRestantes / TICKS_POR_SEGUNDO));
+      fila.texto.setText(`${fila.nombre}  ${seg}s`);
+      const prog = i === 0 ? Math.max(0, Math.min(1, 1 - item.ticksRestantes / item.ticksTotales)) : 0;
+      fila.progreso.setSize(Math.max(0, (this.anchoColaActual - 2) * prog), COLA_BTN_H - 2).setVisible(prog > 0);
+    }
+  }
+
+  private crearFilaColaProduccion(
+    edificioId: number,
+    item: Edificio["cola"][number],
+    left: number,
+    yCentro: number
+  ): void {
+    const nombre = item.esUnidad
+      ? DATOS_UNIDAD[item.tipo]?.nombre ?? `Tipo ${item.tipo}`
+      : DATOS_EDIFICIO[item.tipo]?.nombre ?? `Edificio ${item.tipo}`;
+    const ancho = this.anchoColaActual;
+    const x = left + ancho / 2;
+
+    const bg = this.add
+      .rectangle(x, yCentro, ancho, COLA_BTN_H, 0x1a2733, 0.85)
+      .setDepth(12)
+      .setStrokeStyle(1, 0x4f6b91, 1)
+      .setInteractive({ useHandCursor: true });
+    const progreso = this.add
+      .rectangle(left + 1, yCentro - (COLA_BTN_H - 2) / 2, 0, COLA_BTN_H - 2, 0x4aa8ff, 0.35)
+      .setOrigin(0, 0)
+      .setDepth(12.5)
+      .setVisible(false);
+    const texto = this.add
+      .text(x, yCentro, nombre, {
+        color: "#dfe8ff",
+        fontSize: "11px",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 1,
+        resolution: 2,
+      })
+      .setOrigin(0.5, 0.5)
+      .setDepth(13);
+    const cruz = this.add
+      .text(left + ancho - 10, yCentro, "✕", {
+        color: "#ff5555",
+        fontSize: "11px",
+        fontStyle: "bold",
+        resolution: 2,
+      })
+      .setOrigin(0.5, 0.5)
+      .setDepth(13)
+      .setAlpha(0);
+
+    // Animación hover: el botón crece un poco, se tiñe de rojo (indica "cancelar"),
+    // el texto se desplaza ligeramente y aparece la ✕.
+    const hover = (activo: boolean, animar = true): void => {
+      this.tweens.killTweensOf([bg, texto, cruz]);
+      const duracion = animar ? 130 : 0;
+      bg.setFillStyle(activo ? 0x4a2430 : 0x1a2733, activo ? 1 : 0.85);
+      bg.setStrokeStyle(1, activo ? 0xff6b6b : 0x4f6b91, 1);
+      texto.setColor(activo ? "#ffd0d0" : "#dfe8ff");
+      this.tweens.add({
+        targets: bg,
+        scaleX: activo ? 1.03 : 1,
+        scaleY: activo ? 1.22 : 1,
+        duration: duracion,
+        ease: "Quad.easeOut",
+      });
+      this.tweens.add({
+        targets: texto,
+        x: activo ? x - 8 : x,
+        scaleX: activo ? 1.05 : 1,
+        scaleY: activo ? 1.05 : 1,
+        duration: duracion,
+        ease: "Quad.easeOut",
+      });
+      this.tweens.add({ targets: cruz, alpha: activo ? 1 : 0, duration: duracion, ease: "Quad.easeOut" });
+    };
+
+    bg.on("pointerover", () => hover(true));
+    bg.on("pointerout", () => {
+      hover(false);
+      this.ocultarTooltipBoton();
+    });
+    bg.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+      pointer.event.preventDefault();
+      pointer.event.stopPropagation?.();
+      this.clicConsumidoPorHUD = true;
+      this.pointerDownEnHUD = true;
+      // Pequeño "pulso" al pulsar
+      this.tweens.add({ targets: [bg, texto], scaleX: 0.96, scaleY: 0.9, duration: 70, yoyo: true, ease: "Quad.easeOut" });
+      // Se cancela por id de ítem (no por posición) y la simulación devuelve los recursos.
+      this.sim.enviarOrden({
+        tipo: "cancelarProduccion",
+        edificioId,
+        indice: this.filasColaProduccion.findIndex((f) => f.bg === bg),
+        itemId: item.id,
+        jugador: this.jugadorLocal,
+      });
+    });
+
+    this.registrarTooltipBoton(bg, `Cancel production: remove ${nombre} from the queue.`);
+    this.filasColaProduccion.push({ bg, progreso, texto, cruz, nombre, itemId: item.id });
+    this.botonesColaProduccion.push(bg);
+    this.cameras.main.ignore([bg, progreso, texto, cruz]);
+
+    // Tras reconstruir la lista, si el puntero ya está encima de este botón, se muestra
+    // en estado hover sin esperar a que el ratón se mueva.
+    const p = this.input.activePointer;
+    if (Math.abs(p.x - x) <= ancho / 2 && Math.abs(p.y - yCentro) <= COLA_BTN_H / 2) hover(true, false);
   }
 
   private textoPanel(): string | null {
@@ -2312,8 +3626,12 @@ export class EscenaJuego extends Phaser.Scene {
       const id = [...this.seleccionadas][0];
       const u = this.unitById.get(id);
       if (u) {
-        const botones = ["Attack"];
-        if (u.tipo === TipoUnidad.Obrera) botones.push("Tame");
+        // El Pulgón no ataca: no tiene botón Attack.
+        const botones: string[] = u.tipo === TipoUnidad.Pulgones ? [] : ["Attack"];
+        if (u.tipo === TipoUnidad.Obrera && !this.menuConstruccionAbierto) {
+          botones.push("Build");
+          botones.push("Tame");
+        }
         if (u.tipo === TipoUnidad.Pulgones) botones.push("Cure Disease");
         if (u.tipo === TipoUnidad.Obrera) botones.push("Repair Building");
         if (u.tipo === TipoUnidad.Guerrera) {
@@ -2344,6 +3662,7 @@ export class EscenaJuego extends Phaser.Scene {
         const baseRegen = datos?.regeneracion ?? 0;
         return (
           `${datos?.nombre ?? "Unidad"}  |  Jugador ${u.jugador}\n` +
+          `Función: ${datos?.descripcion ?? "Unidad del ejército."}\n` +
           `HP: ${u.hp}/${datos?.hp ?? u.hp}  |  ATK: ${datos?.atk ?? 0}${velocidadAtaque}  |  DEF: ${datos?.def ?? 0}  |  Regen: ${baseRegen.toFixed(1)} HP/s\n` +
           `${cargaTexto}  |  Estado: ${NOMBRES_ESTADO[u.estado]}\n` +
           `Celda: (${u.x}, ${u.y})`
@@ -2353,10 +3672,19 @@ export class EscenaJuego extends Phaser.Scene {
       const sel = this.sim.unidades.filter((v) => this.seleccionadas.has(v.id));
       const tienePulgones = sel.some((v) => v.tipo === TipoUnidad.Pulgones);
       const tieneTrabajadores = sel.some((v) => v.tipo === TipoUnidad.Obrera);
-      const botones = ["Attack"];
-      if (tieneTrabajadores) botones.push("Tame");
+      const guerreras = this.guerrerasSeleccionadas();
+      const tieneGuerreras = guerreras.length > 0;
+      const esSoloPulgones = sel.length > 0 && sel.every((v) => v.tipo === TipoUnidad.Pulgones);
+      const botones: string[] = esSoloPulgones ? [] : ["Attack"];
+      if (tieneTrabajadores && !this.menuConstruccionAbierto) {
+        botones.push("Build");
+        botones.push("Tame");
+      }
       if (tienePulgones) botones.push("Cure Disease");
       if (tieneTrabajadores) botones.push("Repair Building");
+      if (tieneGuerreras) {
+        botones.push(guerreras.some((v) => v.cadaverCargado !== null) ? "Leave Corpse" : "Carry Corpse");
+      }
       this.crearBotonesAccion(botones);
       const libres = sel.filter((v) => v.estado === 0).length;
       const conCarga = sel.filter((v) => v.cargaAgua > 0 || v.cargaArcilla > 0).length;
@@ -2379,6 +3707,7 @@ export class EscenaJuego extends Phaser.Scene {
         : "";
       return (
         `${datos?.nombre ?? "Unit"}  |  ${propietario}\n` +
+        `Función: ${datos?.descripcion ?? "Unidad enemiga."}\n` +
         `HP: ${unidadInspeccionada.hp}/${datos?.hp ?? unidadInspeccionada.hp}  |  ATK: ${datos?.atk ?? 0}${velocidadAtaque}  |  DEF: ${datos?.def ?? 0}\n` +
         `Cell: (${unidadInspeccionada.x}, ${unidadInspeccionada.y})`
       );
@@ -2401,18 +3730,26 @@ export class EscenaJuego extends Phaser.Scene {
       const ataqueEdificio = (datosEdificio?.atk ?? 0) > 0
         ? `  |  ATK: ${datosEdificio.atk}  |  Attack speed: ${ATAQUES_POR_SEGUNDO.toFixed(1)}/s`
         : "";
-      if (edSel.tipo === TipoEdificio.Reina) {
-        this.crearBotonesAccion([
-          "Ant Worker\n(5A)",
-          "Guerrera\n(5A/6G)",
-          "Voladora\n(4A/4G)",
-          "G. Voladora\n(8A/14G)",
-        ]);
-      } else {
-        this.limpiarBotonesAccion();
+      const botones: string[] = [];
+      if (edSel.enConstruccion) botones.push("Delete building");
+      if ((DATOS_EDIFICIO[edSel.tipo]?.atk ?? 0) > 0 && !edSel.enConstruccion) {
+        botones.push("Attack");
       }
+      if (edSel.tipo === TipoEdificio.Reina) {
+        botones.push(
+          ...[
+            { label: "Ant Worker", costes: { agua: DATOS_UNIDAD[TipoUnidad.Obrera].costeAgua, arcilla: 0, nectar: DATOS_UNIDAD[TipoUnidad.Obrera].costeNectar } },
+            { label: "Guerrera", costes: { agua: DATOS_UNIDAD[TipoUnidad.Guerrera].costeAgua, arcilla: 0, nectar: DATOS_UNIDAD[TipoUnidad.Guerrera].costeNectar } },
+            { label: "Voladora", costes: { agua: DATOS_UNIDAD[TipoUnidad.Voladora].costeAgua, arcilla: 0, nectar: DATOS_UNIDAD[TipoUnidad.Voladora].costeNectar } },
+            { label: "G. Voladora", costes: { agua: DATOS_UNIDAD[TipoUnidad.GuerreraVoladora].costeAgua, arcilla: 0, nectar: DATOS_UNIDAD[TipoUnidad.GuerreraVoladora].costeNectar } },
+          ].map((item) => item.label)
+        );
+      }
+      this.crearBotonesAccion(botones.map((label) => label === "Ant Worker" ? { label, costes: { agua: DATOS_UNIDAD[TipoUnidad.Obrera].costeAgua, arcilla: 0, nectar: DATOS_UNIDAD[TipoUnidad.Obrera].costeNectar } } : label === "Guerrera" ? { label, costes: { agua: DATOS_UNIDAD[TipoUnidad.Guerrera].costeAgua, arcilla: 0, nectar: DATOS_UNIDAD[TipoUnidad.Guerrera].costeNectar } } : label === "Voladora" ? { label, costes: { agua: DATOS_UNIDAD[TipoUnidad.Voladora].costeAgua, arcilla: 0, nectar: DATOS_UNIDAD[TipoUnidad.Voladora].costeNectar } } : label === "G. Voladora" ? { label, costes: { agua: DATOS_UNIDAD[TipoUnidad.GuerreraVoladora].costeAgua, arcilla: 0, nectar: DATOS_UNIDAD[TipoUnidad.GuerreraVoladora].costeNectar } } : label));
+      this.rectSeleccionCelda.setVisible(false);
       return (
-        `${NOMBRES_EDIFICIO[edSel.tipo]}  |  Jugador ${edSel.jugador}\n` +
+        `${DATOS_EDIFICIO[edSel.tipo]?.nombre ?? `E${edSel.tipo}`}  |  Jugador ${edSel.jugador}\n` +
+        `Función: ${datosEdificio?.descripcion ?? "Edificio de la colonia."}\n` +
         `HP: ${edSel.hp}${ataqueEdificio}  |  Tamaño: ${edSel.ancho}x${edSel.alto}  |  Depósito: ${edSel.esDeposito ? "Sí" : "No"}\n` +
         `Esquina: (${edSel.x}, ${edSel.y})`
       );
@@ -2434,7 +3771,8 @@ export class EscenaJuego extends Phaser.Scene {
         ? `  |  ATK: ${datosEdificio.atk}  |  Attack speed: ${ATAQUES_POR_SEGUNDO.toFixed(1)}/s`
         : "";
       return (
-        `${NOMBRES_EDIFICIO[edCelda.tipo]}  |  Jugador ${edCelda.jugador}\n` +
+        `${DATOS_EDIFICIO[edCelda.tipo]?.nombre ?? `E${edCelda.tipo}`}  |  Jugador ${edCelda.jugador}\n` +
+        `Función: ${datosEdificio?.descripcion ?? "Edificio de la colonia."}\n` +
         `HP: ${edCelda.hp}${ataqueEdificio}  |  Tamaño: ${edCelda.ancho}x${edCelda.alto}  |  Depósito: ${edCelda.esDeposito ? "Sí" : "No"}\n` +
         `Esquina: (${edCelda.x}, ${edCelda.y})`
       );
@@ -2454,7 +3792,7 @@ export class EscenaJuego extends Phaser.Scene {
   }
 
   private puntoObjetivo(objetivo: ObjetivoCombate): {
-    objeto: Phaser.GameObjects.Shape | Phaser.GameObjects.Rectangle;
+    objeto: Phaser.GameObjects.Shape | Phaser.GameObjects.Rectangle | Phaser.GameObjects.Image;
     x: number;
     y: number;
   } | null {
@@ -2462,7 +3800,6 @@ export class EscenaJuego extends Phaser.Scene {
       const objeto = this.circulos.get(objetivo.id);
       return objeto ? { objeto, x: objeto.x, y: objeto.y } : null;
     }
-    // PERF: buildingById makes attack targeting lookup O(1) instead of scanning buildings each frame.
     const edificio = this.buildingById.get(objetivo.id);
     const objeto = this.edificiosVisuales.get(objetivo.id);
     return edificio && objeto
@@ -2472,6 +3809,11 @@ export class EscenaJuego extends Phaser.Scene {
           y: (edificio.y + edificio.alto / 2) * TAM,
         }
       : null;
+  }
+
+  private progresoAnimacion(ahora: number, inicio: number, duracion: number): number {
+    const t = Math.max(0, Math.min(1, (ahora - inicio) / duracion));
+    return 1 - (1 - t) ** 2;
   }
 
   private mostrarCantidadFlotante(
@@ -2571,17 +3913,26 @@ export class EscenaJuego extends Phaser.Scene {
     this.mostrarCantidadFlotante(objetivo.x, objetivo.y - 8, `-${ev.dano.toFixed(1)}`, "#ff6969");
   }
 
-  private animarDanoColor(objeto: Phaser.GameObjects.Shape | Phaser.GameObjects.Rectangle): void {
+  private animarDanoColor(objeto: Phaser.GameObjects.Shape | Phaser.GameObjects.Rectangle | Phaser.GameObjects.Image): void {
     this.animarColorFlash(objeto, 0xff5a5a, 120);
   }
 
   private animarColorFlash(
-    objeto: Phaser.GameObjects.Shape | Phaser.GameObjects.Rectangle,
+    objeto: Phaser.GameObjects.Shape | Phaser.GameObjects.Rectangle | Phaser.GameObjects.Image,
     color: number,
     duracion: number
   ): void {
     const animacionActual = this.coloresOriginalesFlash.get(objeto);
     if (animacionActual) this.time.removeEvent(animacionActual.temporizador);
+    if (objeto instanceof Phaser.GameObjects.Image) {
+      objeto.setTintFill(color);
+      const temporizador = this.time.delayedCall(duracion, () => {
+        if (objeto.active) objeto.clearTint();
+        this.coloresOriginalesFlash.delete(objeto);
+      });
+      this.coloresOriginalesFlash.set(objeto, { color, temporizador });
+      return;
+    }
     const colorOriginal = animacionActual?.color ?? objeto.fillColor;
     objeto.setFillStyle(color);
     const temporizador = this.time.delayedCall(duracion, () => {
@@ -2764,13 +4115,21 @@ export class EscenaJuego extends Phaser.Scene {
     this.textoRegenHUD.setVisible(texto !== "");
   }
 
+  private animarConstruccion(ev: { tipo: "construccion"; edificioId: number; cantidad: number }): void {
+    const edificio = this.buildingById.get(ev.edificioId);
+    if (!edificio) return;
+    const x = (edificio.x + edificio.ancho / 2) * TAM;
+    const y = (edificio.y + edificio.alto / 2) * TAM - 8;
+    this.mostrarCantidadFlotante(x, y, `+${ev.cantidad}`, "#dfe8ff", 700);
+  }
+
   private procesarEventosSimulacion(): void {
     for (const ev of this.sim.eventos) {
       if (ev.tipo === "entrega") this.mostrarEntrega(ev);
       else if (ev.tipo === "notificacion") this.mostrarNotificacion(ev.mensaje);
       else if (ev.tipo === "ataque") this.animarAtaque(ev);
       else if (ev.tipo === "curacion") this.animarCuracion(ev);
-      else if (ev.tipo === "construccion") { /* no-op: construction events are informational and do not require visual feedback */ }
+      else if (ev.tipo === "construccion") this.animarConstruccion(ev);
       else if (ev.tipo === "error") this.mostrarErrorSimulacion(ev);
       else if (ev.tipo === "podredumbre") this.animarPodredumbre(ev);
       else if (ev.tipo === "enfermedadCurada") this.animarEnfermedadCurada(ev);
@@ -2845,8 +4204,23 @@ export class EscenaJuego extends Phaser.Scene {
     if (Phaser.Input.Keyboard.JustDown(this.teclaAtaque)) {
       this.modoAtaque = !this.modoAtaque && this.hayUnidadSeleccionadaQuePuedeAtacar();
       this.modoCuracion = false;
-      this.actualizarCursorAtaque();
+      this.actualizarCursorModoSeleccion();
       this.actualizarBotonesModo();
+    }
+    if (Phaser.Input.Keyboard.JustDown(this.teclaEscape)) {
+      if (this.modoConstruccion !== null) {
+        this.modoConstruccion = null;
+        this.menuConstruccionAbierto = false;
+        this.limpiarBotonesConstruccion();
+        this.actualizarBotonesModo();
+        if (this.previewConstruccion) this.previewConstruccion.setVisible(false);
+      } else if (this.menuConstruccionAbierto) {
+        this.cerrarMenuConstruccion();
+      }
+    }
+    if (this.modoConstruccion !== null) {
+      this.menuConstruccionAbierto = true;
+      this.actualizarPreviewConstruccion();
     }
 
     // Cámara
@@ -2887,6 +4261,7 @@ export class EscenaJuego extends Phaser.Scene {
       this.actualizarOverlayDebug();
     }
     this.dibujarEdificios(); // dibuja edificios nuevos (los ya dibujados se omiten)
+    this.actualizarSeleccionEdificio(this.time.now);
     this.dibujarCadaveres();
 
     this.graficoAtaques.clear();
@@ -2983,6 +4358,12 @@ export class EscenaJuego extends Phaser.Scene {
             objetivoAccionX = (edificio.x + edificio.ancho / 2) * TAM;
             objetivoAccionY = (edificio.y + edificio.alto / 2) * TAM;
           }
+        } else if (u.estado === Estado.Construyendo && u.objetivoReparacionId !== null) {
+          const edificio = this.buildingById.get(u.objetivoReparacionId);
+          if (edificio) {
+            objetivoAccionX = (edificio.x + edificio.ancho / 2) * TAM;
+            objetivoAccionY = (edificio.y + edificio.alto / 2) * TAM;
+          }
         } else if ((u.estado === Estado.IrADomesticar || u.estado === Estado.Domesticando) && u.objetivoDomesticacionId !== null) {
           const pulgon = this.unitById.get(u.objetivoDomesticacionId);
           if (pulgon) {
@@ -3062,7 +4443,25 @@ export class EscenaJuego extends Phaser.Scene {
         this.graficoBarrasUnidades.fillStyle(colorBarra, 1);
         this.graficoBarrasUnidades.fillRect(x + 1, y + 1, Math.max(0, ancho - 2) * proporcion, 3);
 
-        if (u.cadaverCargado !== null) {
+        const cargado = u.cadaverCargado !== null;
+        const animacion = this.animacionesCadaveres.get(u.id);
+        if (animacion && (animacion.animTipo === "carga" || animacion.animTipo === "descarga")) {
+          const start = animacion.animTipo === "carga" ? 0 : 1;
+          const end = animacion.animTipo === "carga" ? 1 : 0;
+          const progreso = this.progresoAnimacion(this.time.now, animacion.animInicio, 350);
+          const valor = start + (end - start) * progreso;
+          if (progreso >= 1) {
+            animacion.animTipo = null;
+          }
+          const barWidth = Math.max(10, ancho * 0.55);
+          const barX = x + (ancho - barWidth) / 2;
+          const barY = y - 5;
+          const alpha = animacion.animTipo === "descarga" ? Math.max(0, 1 - valor) : 1;
+          this.graficoBarrasUnidades.fillStyle(0x3a2b00, 0.9 * alpha);
+          this.graficoBarrasUnidades.fillRect(barX, barY, barWidth, 3);
+          this.graficoBarrasUnidades.fillStyle(0xf7d34b, 1 * alpha);
+          this.graficoBarrasUnidades.fillRect(barX + 1, barY + 1, Math.max(0, barWidth - 2) * valor, 1);
+        } else if (cargado) {
           const barWidth = Math.max(10, ancho * 0.55);
           const barX = x + (ancho - barWidth) / 2;
           const barY = y - 5;
@@ -3070,6 +4469,17 @@ export class EscenaJuego extends Phaser.Scene {
           this.graficoBarrasUnidades.fillRect(barX, barY, barWidth, 3);
           this.graficoBarrasUnidades.fillStyle(0xf7d34b, 1);
           this.graficoBarrasUnidades.fillRect(barX + 1, barY + 1, Math.max(0, barWidth - 2), 1);
+        }
+
+        if (cargado !== (animacion?.cargado ?? cargado)) {
+          const siguiente: { cargado: boolean; animInicio: number; animTipo: "carga" | "descarga" | null } = {
+            cargado,
+            animInicio: this.time.now,
+            animTipo: cargado ? "carga" : "descarga",
+          };
+          this.animacionesCadaveres.set(u.id, siguiente);
+        } else if (!animacion) {
+          this.animacionesCadaveres.set(u.id, { cargado, animInicio: this.time.now, animTipo: null });
         }
       }
 
@@ -3190,6 +4600,10 @@ export class EscenaJuego extends Phaser.Scene {
       this.ultimoMinimapaDinamico = this.time.now;
     }
 
+    if (this.time.now - this.ultimoRefrescoCostos >= 250) {
+      this.refrescarColoresCosto();
+      this.ultimoRefrescoCostos = this.time.now;
+    }
     if (this.temporizadorError > 0) {
       this.textoErrorHUD.setText(this.textoMensajeError).setVisible(true);
     } else {
@@ -3202,6 +4616,7 @@ export class EscenaJuego extends Phaser.Scene {
       this.ultimoTextoTick = textoTick;
     }
     this.overlayNoche.setVisible(this.sim.esDeNoche);
+    this.actualizarFondoHudPorSeleccion();
 
     // Panel de información (en el HUD inferior)
     if (this.panelDirty || this.time.now - this.ultimoPanelRefreshMs >= 250) {

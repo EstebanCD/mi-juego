@@ -1,6 +1,6 @@
 import { Mapa, Terreno, Recurso } from "./mapa";
 import { DATOS_UNIDAD, TipoUnidad, Estado, type ObjetivoCombate, type Unidad } from "./unidad";
-import { TipoEdificio, DATOS_EDIFICIO, type Edificio } from "./edificio";
+import { TipoEdificio, DATOS_EDIFICIO, EDIFICIOS_CONSTRUIBLES_POR_OBRERA, type Edificio } from "./edificio";
 import type { Cadaver } from "./cadaver";
 import { buscarRuta, buscarRutaA, pasoValido } from "./rutas";
 
@@ -15,7 +15,10 @@ const TICKS_RECOGIDA_FLOR_PULGON = 20; // 2 segundos
 const TICKS_ENTRE_ATAQUES = 10; // 1 ataque por segundo
 export const ATAQUES_POR_SEGUNDO = TICKS_POR_SEGUNDO / TICKS_ENTRE_ATAQUES;
 const TICKS_CADAVER = 600;
+const DEBUG_SPAWN_UNIDADES = false;
+const DEBUG_ATAQUE_ENEMIGO = false;
 const RADIO_CADAVER = 1;
+const RADIO_BUSQUEDA_OBRA = 8;
 const TICKS_EXPOSICION_CADAVER = 30;
 const TICKS_CURACION_ENFERMEDAD = 30;
 const TICKS_ENTRE_CONTAGIOS = TICKS_POR_SEGUNDO;
@@ -23,6 +26,7 @@ const CONSTRUCCION_HP_POR_SEGUNDO = 5;
 const REPARACION_EDIFICIO_HP_POR_SEGUNDO = 4;
 const PROB_INFECCION_AL_CARGAR_CADAVER = 0.65;
 export const TICKS_DOMESTICACION_PULGON = 100;
+const MAX_CELDAS_ARRASTRE = 40;
 const DATOS_CADAVER: Record<number, { intervalo: number; dano: number }> = {
   1: { intervalo: 20, dano: 2 },
   2: { intervalo: 20, dano: 3 },
@@ -47,7 +51,8 @@ export interface OrdenRecolectar {
 }
 export interface OrdenAtacar {
   tipo: "atacar";
-  unidadId: number;
+  unidadId?: number;
+  edificioId?: number;
   objetivo: ObjetivoCombate;
   jugador?: number;
 }
@@ -67,6 +72,21 @@ export interface OrdenRepararEdificio {
   tipo: "repararEdificio";
   unidadId: number;
   edificioId: number;
+  jugador?: number;
+}
+export interface OrdenConstruir {
+  tipo: "construir";
+  unidadId: number;
+  edificioTipo: number;
+  x: number;
+  y: number;
+  jugador?: number;
+}
+export interface OrdenConstruirLinea {
+  tipo: "construirLinea";
+  unidadIds: number[];
+  edificioTipo: number;
+  celdas: Array<{ x: number; y: number }>;
   jugador?: number;
 }
 export interface OrdenDomesticar {
@@ -98,9 +118,10 @@ export interface OrdenCancelarProduccion {
   tipo: "cancelarProduccion";
   edificioId: number;
   indice: number;
+  itemId?: number; // si se indica, tiene prioridad sobre `indice`
   jugador?: number;
 }
-export type Orden = OrdenMover | OrdenRecolectar | OrdenAtacar | OrdenCurarEnfermedad | OrdenCargarNectar | OrdenRepararEdificio | OrdenDomesticar | OrdenCargarCadaver | OrdenSoltarCadaver | OrdenProducir | OrdenCancelarProduccion;
+export type Orden = OrdenMover | OrdenRecolectar | OrdenAtacar | OrdenCurarEnfermedad | OrdenCargarNectar | OrdenRepararEdificio | OrdenConstruir | OrdenConstruirLinea | OrdenDomesticar | OrdenCargarCadaver | OrdenSoltarCadaver | OrdenProducir | OrdenCancelarProduccion;
 
 // Avisos de la simulación para que el cliente los dibuje (no afectan al juego)
 export interface EventoEntrega {
@@ -163,6 +184,7 @@ export interface Stock {
 }
 
 export class Simulacion {
+  private siguienteIdCola = 1;
   readonly mapa: Mapa;
   readonly unidades: Unidad[] = [];
   readonly edificios: Edificio[] = [];
@@ -184,12 +206,150 @@ export class Simulacion {
   private destinosSoltarCadaver = new Map<number, { x: number; y: number }>();
   private fallosRuta = new Map<number, number>();
   private construccionAcumulada = new Map<number, number>();
+  private asignacionConstruccionTick = new Map<number, number>();
+  private ultimoErrorRecurso = new Map<string, number>();
   private estadoAleatorio: number;
+  private ataqueInicialProgramado: {
+    jugadorAtacante: number;
+    jugadorObjetivo: number;
+    objetivoId: number;
+    unidadIds: number[];
+  } | null = null;
+  private ataqueInicialEmitido = false;
 
   constructor(mapa: Mapa, semilla = 0x6d2b79f5) {
     this.mapa = mapa;
     this.estadoAleatorio = semilla >>> 0;
+    this.stock[0] = { agua: 999, arcilla: 999, nectar: 999 };
+    this.stock[1] = { agua: 999, arcilla: 999, nectar: 999 };
     this.crearPulgonesGaia();
+  }
+
+  private esCeldaValidaParaUnidad(x: number, y: number, ignoraTerreno = false): boolean {
+    if (!this.mapa.dentro(x, y)) return false;
+    if (!ignoraTerreno && this.mapa.esAgua(x, y)) return false;
+    if (this.mapa.estaBloqueada(x, y)) return false;
+    if (this.edificios.some((edificio) => x >= edificio.x && x < edificio.x + edificio.ancho && y >= edificio.y && y < edificio.y + edificio.alto)) {
+      return false;
+    }
+    if (this.unidades.some((unidad) => unidad.x === x && unidad.y === y)) {
+      return false;
+    }
+    return true;
+  }
+
+  private obtenerCeldasSpawnBase(origenX: number, origenY: number, cantidad: number, ignoraTerreno = false): Array<{ x: number; y: number }> {
+    const candidatos: Array<{ x: number; y: number }> = [];
+    const vistos = new Set<string>();
+    for (let radio = 1; radio <= 12; radio++) {
+      for (let dy = -radio; dy <= radio; dy++) {
+        for (let dx = -radio; dx <= radio; dx++) {
+          if (Math.abs(dx) !== radio && Math.abs(dy) !== radio) continue;
+          const x = origenX + dx;
+          const y = origenY + dy;
+          if (x === origenX && y === origenY) continue;
+          if (!this.esCeldaValidaParaUnidad(x, y, ignoraTerreno)) continue;
+          const clave = `${x},${y}`;
+          if (vistos.has(clave)) continue;
+          vistos.add(clave);
+          candidatos.push({ x, y });
+          if (candidatos.length >= cantidad) return candidatos;
+        }
+      }
+    }
+    return candidatos;
+  }
+
+  crearBaseInicial(
+    jugador: number,
+    origenX: number,
+    origenY: number,
+    unidadesExtra: number[] = [],
+    jugadorObjetivo?: number
+  ): { reina: Edificio | null; unidades: Unidad[] } {
+    const reina = this.crearEdificio(TipoEdificio.Reina, jugador, origenX, origenY);
+    if (!reina) {
+      return { reina: null, unidades: [] };
+    }
+
+    const unidades: Unidad[] = [
+      this.crearUnidad(TipoUnidad.Obrera, origenX + 2, origenY - 5, jugador),
+      this.crearUnidad(TipoUnidad.Obrera, origenX + 3, origenY - 5, jugador),
+      this.crearUnidad(TipoUnidad.Obrera, origenX + 4, origenY - 5, jugador),
+      this.crearUnidad(TipoUnidad.Pulgones, origenX + 6, origenY - 5, jugador),
+    ];
+
+    const posicionesExtra = this.obtenerCeldasSpawnBase(origenX, origenY, unidadesExtra.length, true);
+    for (let index = 0; index < unidadesExtra.length; index++) {
+      const tipo = unidadesExtra[index];
+      if (!DATOS_UNIDAD[tipo]) continue;
+      const pos = posicionesExtra[index] ?? { x: origenX + 8 + index * 2, y: origenY - 5 };
+      unidades.push(this.crearUnidad(tipo, pos.x, pos.y, jugador));
+    }
+
+    this.stock[jugador].agua = Math.max(this.stock[jugador].agua, 999);
+    this.stock[jugador].arcilla = Math.max(this.stock[jugador].arcilla, 999);
+    this.stock[jugador].nectar = Math.max(this.stock[jugador].nectar, 999);
+
+    if (jugadorObjetivo !== undefined && jugadorObjetivo !== jugador) {
+      this.programarAtaqueInicial(jugador, jugadorObjetivo);
+    }
+
+    if (DEBUG_SPAWN_UNIDADES) {
+      console.log(`[sim] base ${jugador} creada: reina=(${reina.x},${reina.y}) unidades=${unidades.length} extras=${unidadesExtra.length}`);
+      for (const unidad of unidades) {
+        console.log(`[sim] spawn ${unidad.id} tipo=${unidad.tipo} jugador=${unidad.jugador} pos=(${unidad.x},${unidad.y})`);
+      }
+    }
+    return { reina, unidades };
+  }
+
+  private programarAtaqueInicial(jugadorAtacante: number, jugadorObjetivo: number): void {
+    const objetivo = this.edificios.find((edificio) => edificio.jugador === jugadorObjetivo && edificio.tipo === TipoEdificio.Reina)
+      ?? this.edificios.find((edificio) => edificio.jugador === jugadorObjetivo);
+    if (!objetivo) return;
+    const tiposAtaque = new Set<number>([TipoUnidad.Guerrera, TipoUnidad.Voladora, TipoUnidad.GuerreraVoladora]);
+    const ids = this.unidades.filter(
+      (unidad) => unidad.jugador === jugadorAtacante && tiposAtaque.has(unidad.tipo)
+    ).map((unidad) => unidad.id);
+    if (ids.length === 0) return;
+    this.ataqueInicialProgramado = {
+      jugadorAtacante,
+      jugadorObjetivo,
+      objetivoId: objetivo.id,
+      unidadIds: ids,
+    };
+    if (DEBUG_ATAQUE_ENEMIGO) {
+      console.log(`[sim] ataque programado: jugador=${jugadorAtacante} objetivo=${jugadorObjetivo} ids=${ids.join(",")}`);
+    }
+  }
+
+  private emitirAtaqueInicialProgramado(): void {
+    const plan = this.ataqueInicialProgramado;
+    if (!plan || this.ataqueInicialEmitido) return;
+    const objetivo = this.edificios.find((edificio) => edificio.id === plan.objetivoId && edificio.jugador === plan.jugadorObjetivo);
+    if (!objetivo) {
+      this.ataqueInicialProgramado = null;
+      return;
+    }
+    const ids = plan.unidadIds.filter((id) => this.unidades.some((unidad) => unidad.id === id && unidad.hp > 0 && unidad.jugador === plan.jugadorAtacante));
+    if (ids.length === 0) {
+      this.ataqueInicialProgramado = null;
+      return;
+    }
+    for (const id of ids) {
+      this.ordenes.push({
+        tipo: "atacar",
+        unidadId: id,
+        objetivo: { tipo: "edificio", id: objetivo.id },
+        jugador: plan.jugadorAtacante,
+      });
+    }
+    if (DEBUG_ATAQUE_ENEMIGO) {
+      console.log(`[sim] ataque emitido: ids=${ids.join(",")} target=${objetivo.id} tipo=${objetivo.tipo}`);
+    }
+    this.ataqueInicialProgramado = null;
+    this.ataqueInicialEmitido = true;
   }
 
   private siguienteAleatorio(): number {
@@ -268,12 +428,24 @@ export class Simulacion {
   }
 
   crearUnidad(tipo: number, x: number, y: number, jugador = 0): Unidad {
+    let posX = Math.round(x);
+    let posY = Math.round(y);
+    if (!this.mapa.dentro(posX, posY)) {
+      const antiguaX = posX;
+      const antiguaY = posY;
+      posX = Math.min(Math.max(posX, 0), this.mapa.ancho - 1);
+      posY = Math.min(Math.max(posY, 0), this.mapa.alto - 1);
+      if (DEBUG_SPAWN_UNIDADES) {
+        console.warn(`[sim] unidad creada fuera de mapa: tipo=${tipo} jugador=${jugador} (${antiguaX},${antiguaY}) -> (${posX},${posY})`);
+      }
+    }
+
     const u: Unidad = {
       id: this.siguienteId++,
       tipo,
       jugador,
-      x,
-      y,
+      x: posX,
+      y: posY,
       hp: DATOS_UNIDAD[tipo]?.hp ?? 20,
       ruta: [],
       espera: 0,
@@ -300,9 +472,29 @@ export class Simulacion {
       objetivoDomesticacionId: null,
       temporizadorDomesticacion: 0,
       reintentoRutaTick: 0,
+      bloqueadaPorRecurso: false,
     };
     this.unidades.push(u);
     return u;
+  }
+
+  private puedeColocarEdificio(tipo: number, x: number, y: number): boolean {
+    const d = DATOS_EDIFICIO[tipo];
+    if (!d) return false;
+    for (let j = 0; j < d.alto; j++) {
+      for (let i = 0; i < d.ancho; i++) {
+        const cx = x + i;
+        const cy = y + j;
+        if (!this.mapa.dentro(cx, cy)) return false;
+        if (this.mapa.esAgua(cx, cy)) return false;
+        if (this.mapa.estaBloqueada(cx, cy)) return false;
+        const overlapsExisting = this.edificios.some((otro) => {
+          return cx >= otro.x && cx < otro.x + otro.ancho && cy >= otro.y && cy < otro.y + otro.alto;
+        });
+        if (overlapsExisting) return false;
+      }
+    }
+    return true;
   }
 
   // Devuelve null si alguna celda está fuera del mapa, es agua o ya está ocupada.
@@ -310,23 +502,11 @@ export class Simulacion {
     tipo: number,
     jugador: number,
     x: number,
-    y: number
+    y: number,
+    enConstruccion = false
   ): Edificio | null {
     const d = DATOS_EDIFICIO[tipo];
-    if (!d) return null;
-    for (let j = 0; j < d.alto; j++) {
-      for (let i = 0; i < d.ancho; i++) {
-        const cx = x + i;
-        const cy = y + j;
-        if (!this.mapa.dentro(cx, cy)) return null;
-        if (this.mapa.esAgua(cx, cy)) return null;
-        if (this.mapa.estaBloqueada(cx, cy)) return null;
-        const overlapsExisting = this.edificios.some((otro) => {
-          return cx >= otro.x && cx < otro.x + otro.ancho && cy >= otro.y && cy < otro.y + otro.alto;
-        });
-        if (overlapsExisting) return null;
-      }
-    }
+    if (!d || !this.puedeColocarEdificio(tipo, x, y)) return null;
     for (let j = 0; j < d.alto; j++) {
       for (let i = 0; i < d.ancho; i++) {
         // La reina permite que las unidades caminen sobre ella (es transitable),
@@ -344,9 +524,11 @@ export class Simulacion {
       y,
       ancho: d.ancho,
       alto: d.alto,
-      hp: 1,
+      hp: enConstruccion ? 1 : d.hp,
       esDeposito: d.esDeposito,
-      enConstruccion: true,
+      enConstruccion,
+      temporizadorAtaque: 0,
+      objetivoCombate: null,
       cola: [],
     };
     this.edificios.push(e);
@@ -363,6 +545,20 @@ export class Simulacion {
     this.tickActual++;
     if (this.tickActual >= 10000) {
       this.esDeNoche = true;
+    }
+    if (!this.ataqueInicialEmitido) {
+      this.emitirAtaqueInicialProgramado();
+    }
+    if (DEBUG_ATAQUE_ENEMIGO && this.tickActual === 60) {
+      const tiposAtaque = new Set<number>([TipoUnidad.Guerrera, TipoUnidad.Voladora, TipoUnidad.GuerreraVoladora]);
+      const unidadesEnemigas = this.unidades.filter((u) => u.jugador === 1 && tiposAtaque.has(u.tipo));
+      if (unidadesEnemigas.length > 0) {
+        const objetivo = this.edificios.find((e) => e.jugador === 0 && e.tipo === TipoEdificio.Reina) ?? this.edificios.find((e) => e.jugador === 0);
+        if (objetivo) {
+          const promedio = unidadesEnemigas.reduce((suma, u) => suma + Math.max(Math.abs(u.x - objetivo.x), Math.abs(u.y - objetivo.y)), 0) / unidadesEnemigas.length;
+          console.log(`[sim] distancia promedio enemigo a objetivo en tick 60: ${promedio}`);
+        }
+      }
     }
     this.aplicarOrdenes();
     this.actualizarProduccionEdificios();
@@ -415,7 +611,7 @@ export class Simulacion {
 
   private actualizarProduccionEdificios(): void {
     for (const ed of this.edificios) {
-      if (!ed.cola || ed.cola.length === 0) continue;
+      if (ed.enConstruccion || !ed.cola || ed.cola.length === 0) continue;
       const item = ed.cola[0];
       if (item.ticksRestantes > 0) {
         item.ticksRestantes--;
@@ -477,13 +673,54 @@ export class Simulacion {
     }
   }
 
+  private normalizarCantidadRecurso(valor: number): number {
+    if (!Number.isFinite(valor)) return 0;
+    return Math.max(0, valor);
+  }
+
+  private emitirErrorRecurso(jugador: number, recurso: keyof Stock, mensaje = `Not enough ${recurso}.`): void {
+    const tickUltimo = this.tickActual;
+    const clave = `${jugador}:${recurso}`;
+    if ((this.ultimoErrorRecurso.get(clave) ?? -Infinity) + 10 > tickUltimo) {
+      return;
+    }
+    this.ultimoErrorRecurso.set(clave, tickUltimo);
+    this.eventos.push({ tipo: "error", mensaje });
+  }
+
+  puedePagar(jugador: number, coste: Partial<Record<keyof Stock, number>>): boolean {
+    const stock = this.stock[jugador];
+    if (!stock) return false;
+    return (
+      this.normalizarCantidadRecurso(stock.agua) >= this.normalizarCantidadRecurso(coste.agua ?? 0) &&
+      this.normalizarCantidadRecurso(stock.arcilla) >= this.normalizarCantidadRecurso(coste.arcilla ?? 0) &&
+      this.normalizarCantidadRecurso(stock.nectar) >= this.normalizarCantidadRecurso(coste.nectar ?? 0)
+    );
+  }
+
+  gastar(jugador: number, coste: Partial<Record<keyof Stock, number>>): boolean {
+    if (!this.puedePagar(jugador, coste)) return false;
+    const stock = this.stock[jugador];
+    stock.agua = this.normalizarCantidadRecurso(stock.agua - this.normalizarCantidadRecurso(coste.agua ?? 0));
+    stock.arcilla = this.normalizarCantidadRecurso(stock.arcilla - this.normalizarCantidadRecurso(coste.arcilla ?? 0));
+    stock.nectar = this.normalizarCantidadRecurso(stock.nectar - this.normalizarCantidadRecurso(coste.nectar ?? 0));
+    return true;
+  }
+
+  anadir(jugador: number, recurso: keyof Stock, cantidad: number): void {
+    const valor = Number.isFinite(cantidad) ? cantidad : 0;
+    if (valor <= 0) return;
+    const stock = this.stock[jugador];
+    if (!stock) return;
+    stock[recurso] = this.normalizarCantidadRecurso(stock[recurso] + valor);
+  }
+
   private reembolsarProduccion(edificio: Edificio, indice: number): void {
     const item = edificio.cola[indice];
     if (!item) return;
-    const stock = this.stock[edificio.jugador];
-    stock.agua += item.costeAgua;
-    stock.arcilla += item.costeArcilla;
-    stock.nectar += item.costeNectar;
+    this.anadir(edificio.jugador, "agua", item.costeAgua);
+    this.anadir(edificio.jugador, "arcilla", item.costeArcilla);
+    this.anadir(edificio.jugador, "nectar", item.costeNectar);
     edificio.cola.splice(indice, 1);
   }
 
@@ -514,6 +751,25 @@ export class Simulacion {
         u.temporizadorAtaque = 0;
         u.estado = Estado.Atacando;
         this.prepararRutaAtaque(u, entidad);
+        return;
+      }
+    }
+
+    if (u.tipo === TipoUnidad.Obrera) {
+      const edificioObjetivo = this.edificios.find(
+        (edificio) =>
+          edificio.enConstruccion &&
+          edificio.jugador === u.jugador &&
+          x >= edificio.x &&
+          x < edificio.x + edificio.ancho &&
+          y >= edificio.y &&
+          y < edificio.y + edificio.alto
+      );
+      if (edificioObjetivo) {
+        u.objetivoReparacionId = edificioObjetivo.id;
+        u.estado = Estado.Construyendo;
+        u.ruta = buscarRutaA(this.mapa, u.x, u.y, (cx, cy) => this.adyacenteAEdificio(cx, cy, edificioObjetivo)) ?? [];
+        this.asignacionConstruccionTick.set(u.id, this.tickActual);
         return;
       }
     }
@@ -730,9 +986,137 @@ export class Simulacion {
 
   private aplicarOrdenes(): void {
     for (const o of this.ordenes) {
+      if (o.tipo === "construir") {
+        const u = this.unidades.find((v) => v.id === o.unidadId);
+        if (!u) continue;
+        if (o.jugador !== undefined && u.jugador !== o.jugador) {
+          continue;
+        }
+        if (u.tipo !== TipoUnidad.Obrera || !EDIFICIOS_CONSTRUIBLES_POR_OBRERA.includes(o.edificioTipo as (typeof EDIFICIOS_CONSTRUIBLES_POR_OBRERA)[number])) {
+          this.eventos.push({ tipo: "error", mensaje: "The worker cannot build that building." });
+          continue;
+        }
+        const existente = this.edificios.find(
+          (v) =>
+            v.tipo === o.edificioTipo &&
+            v.x === o.x &&
+            v.y === o.y &&
+            v.jugador === u.jugador &&
+            v.enConstruccion
+        );
+        if (existente) {
+          u.bloqueadaPorRecurso = false;
+          u.objetivoReparacionId = existente.id;
+          u.estado = Estado.Construyendo;
+          this.asignacionConstruccionTick.set(u.id, this.tickActual);
+          u.ruta = buscarRutaA(this.mapa, u.x, u.y, (x, y) => this.adyacenteAEdificio(x, y, existente)) ?? [];
+          continue;
+        }
+        const datos = DATOS_EDIFICIO[o.edificioTipo];
+        if (!datos || !this.puedeColocarEdificio(o.edificioTipo, o.x, o.y)) {
+          this.eventos.push({ tipo: "error", mensaje: "Cannot build here." });
+          continue;
+        }
+        const coste = { agua: datos.costeAgua ?? 0, nectar: datos.costeNectar ?? 0, arcilla: datos.costeArcilla ?? 0 };
+        if (!this.gastar(u.jugador, coste)) {
+          this.emitirErrorRecurso(u.jugador, "arcilla", "Not enough clay.");
+          continue;
+        }
+        const edificio = this.crearEdificio(o.edificioTipo, u.jugador, o.x, o.y, true);
+        if (!edificio) {
+          this.eventos.push({ tipo: "error", mensaje: "Cannot build here." });
+          continue;
+        }
+        u.bloqueadaPorRecurso = false;
+        u.objetivoReparacionId = edificio.id;
+        u.estado = Estado.Construyendo;
+        this.asignacionConstruccionTick.set(u.id, this.tickActual);
+        u.ruta = buscarRutaA(this.mapa, u.x, u.y, (x, y) => this.adyacenteAEdificio(x, y, edificio)) ?? [];
+        continue;
+      }
+      if (o.tipo === "construirLinea") {
+        const jugador = o.jugador ?? 0;
+        const obreras = o.unidadIds
+          .map((id) => this.unidades.find((v) => v.id === id))
+          .filter((unidad): unidad is Unidad => !!unidad && unidad.tipo === TipoUnidad.Obrera && unidad.jugador === jugador)
+          .sort((a, b) => a.id - b.id);
+        if (obreras.length === 0) {
+          this.eventos.push({ tipo: "error", mensaje: "Selecciona una obrera para construir" });
+          continue;
+        }
+        if (!EDIFICIOS_CONSTRUIBLES_POR_OBRERA.includes(o.edificioTipo as (typeof EDIFICIOS_CONSTRUIBLES_POR_OBRERA)[number])) {
+          this.eventos.push({ tipo: "error", mensaje: "The worker cannot build that building." });
+          continue;
+        }
+        if (o.edificioTipo !== TipoEdificio.Muralla) {
+          this.eventos.push({ tipo: "error", mensaje: "Only walls can be built in a line." });
+          continue;
+        }
+        const datos = DATOS_EDIFICIO[o.edificioTipo];
+        if (!datos || datos.ancho !== 1 || datos.alto !== 1) {
+          this.eventos.push({ tipo: "error", mensaje: "This building cannot be placed in a line." });
+          continue;
+        }
+
+        const celdas = o.celdas.slice(0, MAX_CELDAS_ARRASTRE);
+        const obras: Edificio[] = [];
+        let creadas = 0;
+        let faltanRecursos = false;
+        for (const celda of celdas) {
+          const existente = this.edificios.find(
+            (v) =>
+              v.tipo === o.edificioTipo &&
+              v.jugador === jugador &&
+              v.x === celda.x &&
+              v.y === celda.y &&
+              v.enConstruccion
+          );
+          if (existente) {
+            obras.push(existente);
+            continue;
+          }
+          if (!this.mapa.dentro(celda.x, celda.y) || !this.puedeColocarEdificio(o.edificioTipo, celda.x, celda.y)) {
+            continue;
+          }
+          const coste = { agua: datos.costeAgua ?? 0, arcilla: datos.costeArcilla ?? 0, nectar: datos.costeNectar ?? 0 };
+          if (!this.gastar(jugador, coste)) {
+            faltanRecursos = true;
+            this.emitirErrorRecurso(jugador, "arcilla", `Not enough clay: built ${creadas} of ${celdas.length}`);
+            break;
+          }
+          const edificio = this.crearEdificio(o.edificioTipo, jugador, celda.x, celda.y, true);
+          if (!edificio) {
+            continue;
+          }
+          obras.push(edificio);
+          creadas++;
+        }
+        if (obras.length === 0 && faltanRecursos) {
+          continue;
+        }
+        for (let i = 0; i < obreras.length; i++) {
+          const obra = obras[i % Math.max(1, obras.length)];
+          if (!obra) continue;
+          const obrera = obreras[i];
+          obrera.bloqueadaPorRecurso = false;
+          obrera.objetivoReparacionId = obra.id;
+          obrera.estado = Estado.Construyendo;
+          obrera.ruta = buscarRutaA(this.mapa, obrera.x, obrera.y, (x, y) => this.adyacenteAEdificio(x, y, obra)) ?? [];
+          this.asignacionConstruccionTick.set(obrera.id, this.tickActual);
+        }
+        continue;
+      }
       if (o.tipo === "producir") {
         const edificio = this.edificios.find((v) => v.id === o.edificioId);
-        if (!edificio || edificio.tipo !== TipoEdificio.Reina) {
+        if (!edificio) {
+          this.eventos.push({ tipo: "error", mensaje: "The building cannot produce units." });
+          continue;
+        }
+        if (edificio.enConstruccion) {
+          this.eventos.push({ tipo: "error", mensaje: "The building is under construction." });
+          continue;
+        }
+        if (edificio.tipo !== TipoEdificio.Reina) {
           this.eventos.push({ tipo: "error", mensaje: "The building cannot produce units." });
           continue;
         }
@@ -755,14 +1139,12 @@ export class Simulacion {
           this.eventos.push({ tipo: "error", mensaje: "Unknown unit type." });
           continue;
         }
-        const stock = this.stock[edificio.jugador];
-        if (stock.agua < datos.costeAgua || stock.nectar < datos.costeNectar) {
-          this.eventos.push({ tipo: "error", mensaje: "We need more resources." });
+        if (!this.gastar(edificio.jugador, { agua: datos.costeAgua, nectar: datos.costeNectar, arcilla: 0 })) {
+          this.emitirErrorRecurso(edificio.jugador, "agua", "Not enough resources.");
           continue;
         }
-        stock.agua -= datos.costeAgua;
-        stock.nectar -= datos.costeNectar;
         edificio.cola.push({
+          id: this.siguienteIdCola++,
           tipo: o.tipoUnidad,
           esUnidad: true,
           costeAgua: datos.costeAgua,
@@ -776,11 +1158,17 @@ export class Simulacion {
       if (o.tipo === "cancelarProduccion") {
         const edificio = this.edificios.find((v) => v.id === o.edificioId);
         if (!edificio) continue;
-        if (o.indice < 0 || o.indice >= edificio.cola.length) {
-          this.eventos.push({ tipo: "error", mensaje: "Production item not found." });
+        if (o.jugador !== undefined && edificio.jugador !== o.jugador) continue;
+        // Si llega itemId se busca por id: el índice pudo cambiar entre el clic y el tick.
+        const indice = o.itemId !== undefined
+          ? edificio.cola.findIndex((it) => it.id === o.itemId)
+          : o.indice;
+        if (indice < 0 || indice >= edificio.cola.length) {
+          // El ítem ya terminó o fue cancelado: no hay nada que devolver.
+          if (o.itemId === undefined) this.eventos.push({ tipo: "error", mensaje: "Production item not found." });
           continue;
         }
-        this.reembolsarProduccion(edificio, o.indice);
+        this.reembolsarProduccion(edificio, indice);
         continue;
       }
 
@@ -827,6 +1215,13 @@ export class Simulacion {
         if (llevaEste) this.irADeposito(u);
         else this.irARecurso(u);
       } else if (o.tipo === "atacar") {
+        if (o.edificioId !== undefined) {
+          const edificio = this.edificios.find((v) => v.id === o.edificioId);
+          if (!edificio || (DATOS_EDIFICIO[edificio.tipo]?.atk ?? 0) <= 0) continue;
+          edificio.objetivoCombate = o.objetivo;
+          edificio.temporizadorAtaque = 0;
+          continue;
+        }
         u.recursoX = -1;
         u.recursoY = -1;
         const objetivo = this.obtenerObjetivo(o.objetivo);
@@ -863,11 +1258,14 @@ export class Simulacion {
         ) {
           continue;
         }
+        u.bloqueadaPorRecurso = false;
+        u.bloqueadaPorRecurso = false;
         u.objetivoReparacionId = edificio.id;
         u.ruta = buscarRutaA(this.mapa, u.x, u.y, (x, y) =>
           this.adyacenteAEdificio(x, y, edificio)
         ) ?? [];
         u.estado = edificio.enConstruccion ? Estado.Construyendo : Estado.ReparandoEdificio;
+        this.asignacionConstruccionTick.set(u.id, this.tickActual);
       } else if (o.tipo === "domesticar") {
         u.recursoX = -1;
         u.recursoY = -1;
@@ -1184,7 +1582,7 @@ export class Simulacion {
   }
 
   private depositosDe(jugador: number): Edificio[] {
-    return this.edificios.filter((e) => e.esDeposito && e.jugador === jugador);
+    return this.edificios.filter((e) => e.esDeposito && !e.enConstruccion && e.jugador === jugador);
   }
 
   private irADeposito(u: Unidad): void {
@@ -1292,10 +1690,66 @@ export class Simulacion {
     }
   }
 
+  private reasignarObrerasAObrasCercanas(idsTrabajando: number[] = []): void {
+    const idsPermitidos = new Set(idsTrabajando);
+    for (const obrera of this.unidades) {
+      if (
+        obrera.tipo !== TipoUnidad.Obrera ||
+        obrera.estado !== Estado.Libre ||
+        obrera.bloqueadaPorRecurso ||
+        obrera.objetivoReparacionId !== null ||
+        obrera.objetivoNectarId !== null ||
+        (idsTrabajando.length > 0 && !idsPermitidos.has(obrera.id))
+      ) {
+        continue;
+      }
+
+      const candidatos = this.edificios
+        .filter((edificio) => edificio.jugador === obrera.jugador && edificio.enConstruccion)
+        .map((edificio) => {
+          const centroX = edificio.x + edificio.ancho / 2;
+          const centroY = edificio.y + edificio.alto / 2;
+          const distancia = Math.max(Math.abs(obrera.x - centroX), Math.abs(obrera.y - centroY));
+          const obrerasAsignadas = this.unidades.filter(
+            (otra) =>
+              otra.id !== obrera.id &&
+              otra.tipo === TipoUnidad.Obrera &&
+              otra.objetivoReparacionId === edificio.id &&
+              (otra.estado === Estado.Construyendo || otra.estado === Estado.ReparandoEdificio)
+          ).length;
+          return { edificio, distancia, obrerasAsignadas };
+        })
+        .filter(({ edificio, distancia }) => distancia <= RADIO_BUSQUEDA_OBRA && this.stock[edificio.jugador].arcilla > 0)
+        .sort((a, b) => a.distancia - b.distancia || a.obrerasAsignadas - b.obrerasAsignadas || a.edificio.id - b.edificio.id);
+
+      let objetivo: Edificio | null = null;
+      for (const candidato of candidatos) {
+        const ruta = buscarRutaA(this.mapa, obrera.x, obrera.y, (x, y) =>
+          this.adyacenteAEdificio(x, y, candidato.edificio)
+        );
+        if (ruta === null) continue;
+        objetivo = candidato.edificio;
+        break;
+      }
+
+      if (!objetivo) continue;
+      obrera.bloqueadaPorRecurso = false;
+      obrera.objetivoReparacionId = objetivo.id;
+      obrera.estado = Estado.Construyendo;
+      obrera.ruta = buscarRutaA(this.mapa, obrera.x, obrera.y, (x, y) => this.adyacenteAEdificio(x, y, objetivo)) ?? [];
+      this.asignacionConstruccionTick.set(obrera.id, this.tickActual);
+    }
+  }
+
   private actualizarReparacionesEdificios(): void {
-    const trabajadoresPorEdificio = new Map<number, number>();
+    const trabajadoresPorEdificio = new Map<number, Unidad[]>();
 
     for (const unidad of this.unidades) {
+      const asignadoTick = this.asignacionConstruccionTick.get(unidad.id);
+      if (asignadoTick === this.tickActual) {
+        this.asignacionConstruccionTick.delete(unidad.id);
+        continue;
+      }
       const trabajandoEnEdificio =
         unidad.estado === Estado.ReparandoEdificio || unidad.estado === Estado.Construyendo;
       if (!trabajandoEnEdificio || unidad.objetivoReparacionId === null) continue;
@@ -1303,6 +1757,7 @@ export class Simulacion {
       if (!edificio || edificio.jugador !== unidad.jugador) {
         unidad.objetivoReparacionId = null;
         unidad.estado = Estado.Libre;
+        unidad.bloqueadaPorRecurso = false;
         unidad.ruta = [];
         continue;
       }
@@ -1311,6 +1766,7 @@ export class Simulacion {
       if (edificio.hp >= maximo) {
         unidad.objetivoReparacionId = null;
         unidad.estado = Estado.Libre;
+        unidad.bloqueadaPorRecurso = false;
         unidad.ruta = [];
         continue;
       }
@@ -1324,6 +1780,7 @@ export class Simulacion {
             this.registrarFalloRuta(unidad, () => {
               unidad.objetivoReparacionId = null;
               unidad.estado = Estado.Libre;
+              unidad.bloqueadaPorRecurso = false;
               unidad.ruta = [];
             });
             continue;
@@ -1334,22 +1791,62 @@ export class Simulacion {
         continue;
       }
 
-      trabajadoresPorEdificio.set(edificio.id, (trabajadoresPorEdificio.get(edificio.id) ?? 0) + 1);
+      const lista = trabajadoresPorEdificio.get(edificio.id) ?? [];
+      lista.push(unidad);
+      trabajadoresPorEdificio.set(edificio.id, lista);
     }
 
-    for (const [edificioId, n] of trabajadoresPorEdificio) {
+    const arcillaDisponiblePorJugador = new Map<number, number>();
+    for (const [edificioId, unidades] of [...trabajadoresPorEdificio.entries()].sort(([a], [b]) => a - b)) {
       const edificio = this.edificios.find((v) => v.id === edificioId);
       if (!edificio) continue;
 
       const maximo = DATOS_EDIFICIO[edificio.tipo]?.hp ?? edificio.hp;
       if (edificio.hp >= maximo) continue;
 
+      const jornada = [...unidades].sort((a, b) => a.id - b.id);
+      let arcillaDisponible = arcillaDisponiblePorJugador.get(edificio.jugador) ?? this.stock[edificio.jugador].arcilla;
+      const activos: Unidad[] = [];
+      let emitidoFaltaArcilla = false;
+      for (const unidad of jornada) {
+        if (edificio.enConstruccion && arcillaDisponible <= 0) {
+          if (!emitidoFaltaArcilla) {
+            this.emitirErrorRecurso(edificio.jugador, "arcilla", "Not enough clay.");
+            emitidoFaltaArcilla = true;
+          }
+          unidad.objetivoReparacionId = null;
+          unidad.estado = Estado.Libre;
+          unidad.ruta = [];
+          unidad.bloqueadaPorRecurso = true;
+          continue;
+        }
+        if (edificio.enConstruccion && arcillaDisponible > 0) {
+          const antes = this.stock[edificio.jugador].arcilla;
+          if (!this.gastar(edificio.jugador, { agua: 0, arcilla: 1, nectar: 0 })) {
+            if (!emitidoFaltaArcilla) {
+              this.emitirErrorRecurso(edificio.jugador, "arcilla", "Not enough clay.");
+              emitidoFaltaArcilla = true;
+            }
+            unidad.objetivoReparacionId = null;
+            unidad.estado = Estado.Libre;
+            unidad.ruta = [];
+            unidad.bloqueadaPorRecurso = true;
+            continue;
+          }
+          arcillaDisponible = Math.max(0, antes - 1);
+          arcillaDisponiblePorJugador.set(edificio.jugador, arcillaDisponible);
+        }
+        activos.push(unidad);
+      }
+
+      if (!edificio.enConstruccion && activos.length === 0) continue;
+
       const tasaBase = edificio.enConstruccion
         ? CONSTRUCCION_HP_POR_SEGUNDO
         : REPARACION_EDIFICIO_HP_POR_SEGUNDO;
       const aumento = Math.min(
         maximo - edificio.hp,
-        (tasaBase / TICKS_POR_SEGUNDO) * n
+        (tasaBase / TICKS_POR_SEGUNDO) * activos.length
       );
       if (aumento <= 0) continue;
 
@@ -1357,12 +1854,25 @@ export class Simulacion {
       const actual = this.construccionAcumulada.get(edificio.id) ?? 0;
       this.construccionAcumulada.set(edificio.id, actual + aumento);
 
-      if (edificio.hp >= maximo) {
+      if (edificio.hp >= maximo && edificio.enConstruccion) {
         edificio.enConstruccion = false;
+        this.construccionAcumulada.delete(edificio.id);
         this.eventos.push({
           tipo: "notificacion",
           mensaje: `${DATOS_EDIFICIO[edificio.tipo]?.nombre ?? "Edificio"} completed.`,
         });
+        const idsTrabajando = this.unidades
+          .filter((unidad) => unidad.objetivoReparacionId === edificio.id && (unidad.estado === Estado.Construyendo || unidad.estado === Estado.ReparandoEdificio))
+          .map((unidad) => unidad.id);
+        for (const unidad of this.unidades) {
+          if (unidad.objetivoReparacionId === edificio.id) {
+            unidad.objetivoReparacionId = null;
+            unidad.estado = Estado.Libre;
+            unidad.ruta = [];
+            unidad.bloqueadaPorRecurso = false;
+          }
+        }
+        this.reasignarObrerasAObrasCercanas(idsTrabajando);
       }
     }
   }
@@ -1632,6 +2142,10 @@ export class Simulacion {
     return edificio ? this.adyacenteAEdificio(u.x, u.y, edificio) : false;
   }
 
+  private objetivoEnRango(entidad: Unidad | Edificio, objetivo: Unidad | Edificio, rango: number): boolean {
+    return this.distanciaAtaqueObjetivo(entidad.x, entidad.y, objetivo) <= rango;
+  }
+
   private prepararRutaAtaque(u: Unidad, objetivo: Unidad | Edificio): void {
     const ruta = buscarRutaA(this.mapa, u.x, u.y, (x, y) =>
       "ancho" in objetivo
@@ -1809,7 +2323,81 @@ export class Simulacion {
     }
   }
 
+  private distanciaAtaqueObjetivo(x: number, y: number, objetivo: Unidad | Edificio): number {
+    if ("ancho" in objetivo) {
+      let mejor = Number.POSITIVE_INFINITY;
+      for (let dy = 0; dy < objetivo.alto; dy++) {
+        for (let dx = 0; dx < objetivo.ancho; dx++) {
+          const cx = objetivo.x + dx;
+          const cy = objetivo.y + dy;
+          mejor = Math.min(mejor, Math.max(Math.abs(x - cx), Math.abs(y - cy)));
+        }
+      }
+      return mejor;
+    }
+    return Math.max(Math.abs(x - objetivo.x), Math.abs(y - objetivo.y));
+  }
+
+  private rangoAtaqueEntidad(entidad: Unidad | Edificio): number {
+    if ("ancho" in entidad) {
+      return DATOS_EDIFICIO[entidad.tipo]?.rango ?? 1;
+    }
+    return 1;
+  }
+
+  private elegirObjetivoAtaque(entidad: Unidad | Edificio): ObjetivoCombate | null {
+    const rango = this.rangoAtaqueEntidad(entidad);
+    let mejor: { distancia: number; objetivo: ObjetivoCombate } | null = null;
+
+    for (const unidad of this.unidades) {
+      if (unidad.hp <= 0 || unidad.jugador === entidad.jugador || unidad.jugador < 0) continue;
+      const distancia = this.distanciaAtaqueObjetivo(entidad.x, entidad.y, unidad);
+      if (distancia > rango) continue;
+      const objetivo = { tipo: "unidad" as const, id: unidad.id };
+      if (!mejor || distancia < mejor.distancia || (distancia === mejor.distancia && objetivo.id < mejor.objetivo.id)) {
+        mejor = { distancia, objetivo };
+      }
+    }
+
+    for (const edificio of this.edificios) {
+      if (edificio.hp <= 0 || edificio.jugador === entidad.jugador || edificio.jugador < 0) continue;
+      const distancia = this.distanciaAtaqueObjetivo(entidad.x, entidad.y, edificio);
+      if (distancia > rango) continue;
+      const objetivo = { tipo: "edificio" as const, id: edificio.id };
+      if (!mejor || distancia < mejor.distancia || (distancia === mejor.distancia && objetivo.id < mejor.objetivo.id)) {
+        mejor = { distancia, objetivo };
+      }
+    }
+
+    return mejor?.objetivo ?? null;
+  }
+
+  private danoAtaque(atacante: Unidad | Edificio, objetivo: Unidad | Edificio): number {
+    const ataque = "ancho" in atacante ? DATOS_EDIFICIO[atacante.tipo]?.atk ?? 0 : DATOS_UNIDAD[atacante.tipo]?.atk ?? 0;
+    const defensa = "ancho" in objetivo ? DATOS_EDIFICIO[objetivo.tipo]?.def ?? 0 : DATOS_UNIDAD[objetivo.tipo]?.def ?? 0;
+    const defensaEfectiva = Math.min(defensa, 90);
+    return Math.max(1, ataque * (1 - defensaEfectiva / 100));
+  }
+
+  private ticksEntreAtaques(atacante: Unidad | Edificio): number {
+    if ("ancho" in atacante) {
+      const datos = DATOS_EDIFICIO[atacante.tipo];
+      const ataquesPorSegundo = datos?.ataquesPorSegundo ?? 1;
+      return Math.max(1, Math.round(TICKS_POR_SEGUNDO / ataquesPorSegundo));
+    }
+    return TICKS_ENTRE_ATAQUES;
+  }
+
   private actualizarCombate(): void {
+    for (const u of this.unidades) {
+      if (u.hp <= 0 || u.objetivoCombate !== null || (DATOS_UNIDAD[u.tipo]?.atk ?? 0) <= 0) continue;
+      if (u.estado !== Estado.Libre && u.estado !== Estado.Atacando) continue;
+      const objetivo = this.elegirObjetivoAtaque(u);
+      if (!objetivo) continue;
+      u.objetivoCombate = objetivo;
+      u.estado = Estado.Atacando;
+    }
+
     for (const u of this.unidades) {
       if (u.estado !== Estado.Atacando || !u.objetivoCombate || u.hp <= 0) continue;
       const objetivo = this.obtenerObjetivo(u.objetivoCombate);
@@ -1844,12 +2432,7 @@ export class Simulacion {
         u.temporizadorAtaque--;
         continue;
       }
-      const ataque = DATOS_UNIDAD[u.tipo]?.atk ?? 0;
-      const defensa = "tipo" in objetivo && u.objetivoCombate.tipo === "unidad"
-        ? DATOS_UNIDAD[objetivo.tipo]?.def ?? 0
-        : 0;
-      const defensaEfectiva = Math.min(defensa, 90);
-      const dano = Math.max(1, ataque * (1 - defensaEfectiva / 100));
+      const dano = this.danoAtaque(u, objetivo);
       objetivo.hp = Math.max(0, objetivo.hp - dano);
       this.eventos.push({
         tipo: "ataque",
@@ -1858,6 +2441,34 @@ export class Simulacion {
         dano,
       });
       u.temporizadorAtaque = TICKS_ENTRE_ATAQUES;
+    }
+
+    for (const edificio of this.edificios) {
+      if (edificio.hp <= 0 || edificio.enConstruccion) continue;
+      const datos = DATOS_EDIFICIO[edificio.tipo];
+      if ((datos?.atk ?? 0) <= 0) continue;
+
+      let objetivoCombate = edificio.objetivoCombate;
+      let objetivo = objetivoCombate ? this.obtenerObjetivo(objetivoCombate) : null;
+      if (!objetivo || objetivo.hp <= 0 || !this.objetivoEnRango(edificio, objetivo, datos.rango ?? 1)) {
+        objetivoCombate = this.elegirObjetivoAtaque(edificio);
+        edificio.objetivoCombate = objetivoCombate;
+        objetivo = objetivoCombate ? this.obtenerObjetivo(objetivoCombate) : null;
+      }
+      if (!edificio.objetivoCombate || !objetivo) continue;
+      if (edificio.temporizadorAtaque > 0) {
+        edificio.temporizadorAtaque--;
+        continue;
+      }
+      const dano = this.danoAtaque(edificio, objetivo);
+      objetivo.hp = Math.max(0, objetivo.hp - dano);
+      this.eventos.push({
+        tipo: "ataque",
+        atacanteId: edificio.id,
+        objetivo: edificio.objetivoCombate,
+        dano,
+      });
+      edificio.temporizadorAtaque = this.ticksEntreAtaques(edificio);
     }
   }
 
@@ -1884,6 +2495,7 @@ export class Simulacion {
     for (let i = this.edificios.length - 1; i >= 0; i--) {
       const edificio = this.edificios[i];
       if (edificio.hp > 0) continue;
+      this.construccionAcumulada.delete(edificio.id);
       const stock = this.stock[edificio.jugador];
       for (const item of edificio.cola) {
         stock.agua += item.costeAgua;

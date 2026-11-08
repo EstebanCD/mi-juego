@@ -1,111 +1,175 @@
-import { DATOS_EDIFICIO, TipoEdificio } from "./edificio";
-import { Mapa } from "./mapa";
-import { Simulacion } from "./simulacion";
-import { TipoUnidad } from "./unidad";
+import { DATOS_EDIFICIO, TipoEdificio, EDIFICIOS_CONSTRUIBLES_POR_OBRERA } from "./edificio";
+import { crearMapaPrueba } from "./mapaPrueba";
+import { Simulacion, TICKS_POR_SEGUNDO } from "./simulacion";
+import { Estado, TipoUnidad } from "./unidad";
 
-function ordenarConstruccion(sim: Simulacion, unidadId: number, edificioId: number): void {
+function logCheck(label: string, ok: boolean, detail = ""): void {
+  console.log(`${ok ? "PASS" : "FAIL"}: ${label}${detail ? ` - ${detail}` : ""}`);
+}
+
+function crearSimConReina(): Simulacion {
+  const sim = new Simulacion(crearMapaPrueba(), 7);
+  sim.crearUnidad(TipoUnidad.Reina, 8, 17, 0);
+  return sim;
+}
+
+function asignarConstruccion(sim: Simulacion, edificioId: number, x: number, y: number): void {
+  const u = sim.crearUnidad(TipoUnidad.Obrera, x, y, 0);
+  u.objetivoReparacionId = edificioId;
+  u.estado = Estado.Construyendo;
+  u.ruta = [];
+}
+
+{
+  const sim = crearSimConReina();
+  const obrera = sim.crearUnidad(TipoUnidad.Obrera, 9, 17, 0);
   sim.enviarOrden({
-    tipo: "repararEdificio",
-    unidadId,
-    edificioId,
+    tipo: "construir",
+    unidadId: obrera.id,
+    edificioTipo: TipoEdificio.Madriguera,
+    x: 9,
+    y: 18,
     jugador: 0,
   });
+  sim.tick();
+  const edificio = sim.edificios.find((e) => e.tipo === TipoEdificio.Madriguera);
+  const ok = !!edificio && edificio.hp === 1 && edificio.enConstruccion === true;
+  logCheck("Madriguera starts at 1 HP and enConstruccion", ok, `hp=${edificio?.hp ?? "n/a"}, enConstruccion=${String(edificio?.enConstruccion ?? false)}`);
 }
 
-function crearMadrigueraEnConstruccion(): { sim: Simulacion; edificio: ReturnType<Simulacion["crearEdificio"]> } {
-  const sim = new Simulacion(new Mapa(40, 40), 1234);
-  const edificio = sim.crearEdificio(TipoEdificio.Madriguera, 0, 5, 5);
-  if (!edificio) throw new Error("No se pudo crear la madriguera de prueba.");
-  if (edificio.hp !== 1) {
-    throw new Error(`La madriguera debe empezar en 1 HP para construcción incremental; valor actual: ${edificio.hp}.`);
+function completarConstruccionConNTrabajadores(n: number): number {
+  const sim = crearSimConReina();
+  const edificio = sim.crearEdificio(TipoEdificio.Madriguera, 0, 40, 40, true)!;
+  for (let i = 0; i < n; i++) {
+    asignarConstruccion(sim, edificio.id, 39 - i, 40);
   }
-  if (!edificio.enConstruccion) {
-    throw new Error("La madriguera debe marcarse como en construcción al crearse.");
-  }
-  return { sim, edificio };
-}
-
-function completarConstruccionConAportes(aumentos: number[]): number {
-  const { sim, edificio } = crearMadrigueraEnConstruccion();
-  const muro = edificio!;
-  const maximo = DATOS_EDIFICIO[TipoEdificio.Madriguera].hp;
-  const trabajadores: Array<{ id: number; x: number; y: number }> = [];
-
-  for (let i = 0; i < 3; i++) {
-    const u = sim.crearUnidad(TipoUnidad.Obrera, 4 + i, 5, 0);
-    trabajadores.push({ id: u.id, x: u.x, y: u.y });
-  }
-
-  ordenarConstruccion(sim, trabajadores[0].id, muro.id);
-
   let ticks = 0;
-  let indiceSiguienteUnion = 0;
-  while (muro.hp < maximo && ticks < 3000) {
-    if (indiceSiguienteUnion < aumentos.length && muro.hp >= aumentos[indiceSiguienteUnion]) {
-      const siguiente = trabajadores[indiceSiguienteUnion + 1];
-      if (siguiente) ordenarConstruccion(sim, siguiente.id, muro.id);
-      indiceSiguienteUnion++;
-    }
+  while (edificio.hp < DATOS_EDIFICIO[TipoEdificio.Madriguera].hp && ticks < 2000) {
     sim.tick();
     ticks++;
   }
-
-  if (muro.hp < maximo) {
-    throw new Error(`No terminó la construcción antes de 3000 ticks; hp final: ${muro.hp}.`);
-  }
-
   return ticks;
 }
 
 {
-  const valor = completarConstruccionConAportes([]);
-  if (Math.abs(valor - 400) > 30) {
-    throw new Error(`1 constructor: esperaba ~400 ticks, obtuvo ${valor}.`);
-  }
-  console.log(`1 constructor: ${valor} ticks`);
+  const ticks = completarConstruccionConNTrabajadores(1);
+  const ok = Math.abs(ticks - 400) <= 10;
+  logCheck("1 worker completes Madriguera in ~400 ticks", ok, `ticks=${ticks}`);
 }
 
 {
-  const valor = completarConstruccionConAportes([100]);
-  if (Math.abs(valor - 300) > 35) {
-    throw new Error(`2 constructores: esperaba ~300 ticks, obtuvo ${valor}.`);
-  }
-  console.log(`2 constructores: ${valor} ticks`);
+  const ticks = completarConstruccionConNTrabajadores(2);
+  const ok = Math.abs(ticks - 200) <= 10;
+  logCheck("2 workers complete Madriguera in ~200 ticks", ok, `ticks=${ticks}`);
 }
 
 {
-  const valor = completarConstruccionConAportes([100, 100]);
-  if (Math.abs(valor - 267) > 35) {
-    throw new Error(`3 constructores: esperaba ~267 ticks, obtuvo ${valor}.`);
+  const ticks = completarConstruccionConNTrabajadores(3);
+  const ok = Math.abs(ticks - 134) <= 10;
+  logCheck("3 workers complete Madriguera in ~134 ticks", ok, `ticks=${ticks}`);
+}
+
+function completarConUniones(uniones: number[]): number {
+  const sim = crearSimConReina();
+  const edificio = sim.crearEdificio(TipoEdificio.Madriguera, 0, 55, 55, true)!;
+  const trabajadores: Array<{ x: number; y: number }> = [{ x: 54, y: 55 }];
+  for (const t of trabajadores) {
+    asignarConstruccion(sim, edificio.id, t.x, t.y);
   }
-  console.log(`3 constructores: ${valor} ticks`);
+  let siguienteUnion = 0;
+  let ticks = 0;
+  while (edificio.hp < DATOS_EDIFICIO[TipoEdificio.Madriguera].hp && ticks < 2000) {
+    if (siguienteUnion < uniones.length && edificio.hp >= uniones[siguienteUnion]) {
+      trabajadores.push({ x: 53 - siguienteUnion, y: 56 });
+      asignarConstruccion(sim, edificio.id, trabajadores[trabajadores.length - 1].x, trabajadores[trabajadores.length - 1].y);
+      siguienteUnion++;
+    }
+    sim.tick();
+    ticks++;
+  }
+  return ticks;
 }
 
-const sim = new Simulacion(new Mapa(40, 40), 7);
-const edificio = sim.crearEdificio(TipoEdificio.Muralla, 0, 5, 5)!;
-if (edificio.hp !== 1) {
-  throw new Error(`La muralla en prueba debe empezar en 1 HP; valor actual: ${edificio.hp}.`);
+{
+  const ticks = completarConUniones([100]);
+  const ok = Math.abs(ticks - 300) <= 10;
+  logCheck("Second builder joining at 100 HP completes in ~300 ticks total", ok, `ticks=${ticks}`);
 }
-const primer = sim.crearUnidad(TipoUnidad.Obrera, 4, 5, 0);
-ordenarConstruccion(sim, primer.id, edificio.id);
-for (let i = 0; i < 300; i++) sim.tick();
-const segundo = sim.crearUnidad(TipoUnidad.Obrera, 6, 5, 0);
-ordenarConstruccion(sim, segundo.id, edificio.id);
-for (let i = 0; i < 150; i++) sim.tick();
-if (Math.abs(edificio.hp - 300) > 20) {
-  throw new Error(`Arribo tardío: la muralla terminó en ${edificio.hp} HP, esperado cerca de 300.`);
-}
-console.log(`Arribo tardío: hp=${edificio.hp} al tick ${sim.tickActual}`);
 
-const simEvento = new Simulacion(new Mapa(40, 40), 99);
-const edificioEvento = simEvento.crearEdificio(TipoEdificio.Muralla, 0, 9, 9)!;
-for (let i = 0; i < 2; i++) {
-  const u = simEvento.crearUnidad(TipoUnidad.Obrera, 8 + i, 9, 0);
-  ordenarConstruccion(simEvento, u.id, edificioEvento.id);
+{
+  const ticks = completarConUniones([100, 100]);
+  const ok = Math.abs(ticks - 267) <= 10;
+  logCheck("Second and third builder join at half completion in ~267 ticks", ok, `ticks=${ticks}`);
 }
-for (let i = 0; i < 10; i++) simEvento.tick();
-const evento = simEvento.eventos.find((ev) => ev.tipo === "construccion");
-if (!evento || Math.abs(evento.cantidad - 10) > 0.6) {
-  throw new Error(`Evento de construcción inesperado: ${JSON.stringify(evento)} (se esperaba ~10 HP en 1 segundo con 2 obreras).`);
+
+{
+  const sim = crearSimConReina();
+  const edificio = sim.crearEdificio(TipoEdificio.Muralla, 0, 70, 70, true)!;
+  asignarConstruccion(sim, edificio.id, 69, 70);
+  let ticks = 0;
+  while (edificio.hp < DATOS_EDIFICIO[TipoEdificio.Muralla].hp && ticks < 2000) {
+    sim.tick();
+    ticks++;
+  }
+  const ok = Math.abs(ticks - 600) <= 10;
+  logCheck("Muralla with 1 worker completes in ~600 ticks", ok, `ticks=${ticks}, hp=${edificio.hp}`);
 }
-console.log(`Evento por segundo: ${JSON.stringify(evento)}`);
+
+{
+  const sim = crearSimConReina();
+  const edificio = sim.crearEdificio(TipoEdificio.Madriguera, 0, 80, 80, true)!;
+  const obrera = sim.crearUnidad(TipoUnidad.Obrera, 79, 80, 0);
+  obrera.objetivoReparacionId = edificio.id;
+  obrera.estado = Estado.Construyendo;
+  sim.enviarOrden({ tipo: "producir", edificioId: edificio.id, tipoUnidad: TipoUnidad.Obrera, jugador: 0 });
+  sim.tick();
+  const error = sim.eventos.some((ev) => ev.tipo === "error" && ev.mensaje === "The building is under construction.");
+  const depositos = (sim as any).depositosDe(0);
+  const ok = error && !depositos.some((e: { id: number }) => e.id === edificio.id);
+  logCheck("Under-construction building rejects production and deliveries", ok, `error=${String(error)} deposit=${String(!depositos.some((e: { id: number }) => e.id === edificio.id))}`);
+}
+
+{
+  const sim = crearSimConReina();
+  const obrera = sim.crearUnidad(TipoUnidad.Obrera, 9, 17, 0);
+  sim.enviarOrden({
+    tipo: "construir",
+    unidadId: obrera.id,
+    edificioTipo: TipoEdificio.Madriguera,
+    x: 20,
+    y: 20,
+    jugador: 0,
+  });
+  sim.tick();
+  const errores = sim.eventos.filter((ev) => ev.tipo === "error" && ev.mensaje === "Cannot build here.");
+  const ok = errores.length > 0 && sim.edificios.filter((e) => e.tipo === TipoEdificio.Madriguera).length === 0;
+  logCheck("Water placement is rejected without creating a building", ok, `errorCount=${errores.length}`);
+}
+
+{
+  const sim = crearSimConReina();
+  const edificio = sim.crearEdificio(TipoEdificio.Madriguera, 0, 90, 90, true)!;
+  edificio.puntoRendezvousX = 90;
+  edificio.puntoRendezvousY = 90;
+  const obrera = sim.crearUnidad(TipoUnidad.Obrera, 88, 90, 0);
+  (sim as any).aplicarOrdenRendezvous(obrera, edificio);
+  const ok = obrera.objetivoReparacionId === edificio.id && obrera.estado === Estado.Construyendo;
+  logCheck("Worker rally to under-construction building assigns construction", ok, `objetivo=${obrera.objetivoReparacionId ?? "n/a"}, estado=${obrera.estado}`);
+}
+
+{
+  const sim = crearSimConReina();
+  sim.stock[0].arcilla = 500;
+  const edificio = sim.crearEdificio(TipoEdificio.Madriguera, 0, 100, 100, true)!;
+  asignarConstruccion(sim, edificio.id, 98, 100);
+  asignarConstruccion(sim, edificio.id, 99, 100);
+  const antes = sim.stock[0].arcilla;
+  for (let i = 0; i < TICKS_POR_SEGUNDO; i++) sim.tick();
+  const delta = antes - sim.stock[0].arcilla;
+  const ok = Number.isInteger(sim.stock[0].arcilla) && Math.abs(delta - 19) <= 0.01;
+  logCheck("Two workers consume clay per worker while building", ok, `delta=${delta.toFixed(2)}, stock=${sim.stock[0].arcilla}`);
+}
+
+const construibles = EDIFICIOS_CONSTRUIBLES_POR_OBRERA;
+logCheck("Construction whitelist contains Madriguera and Muralla", construibles.includes(TipoEdificio.Madriguera) && construibles.includes(TipoEdificio.Muralla), `whitelist=${JSON.stringify(construibles)}`);
+

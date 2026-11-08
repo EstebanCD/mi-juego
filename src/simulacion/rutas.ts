@@ -128,12 +128,13 @@ export function buscarRuta(
   ox: number,
   oy: number,
   dx: number,
-  dy: number
+  dy: number,
+  maxNodos = Math.max(6000, mapa.ancho * mapa.alto)
 ): Celda[] | null {
   if (!mapa.dentro(dx, dy)) return null;
   if (ox === dx && oy === dy) return [];
 
-  const base = bfs(mapa, ox, oy, dx, dy);
+  const base = bfs(mapa, ox, oy, dx, dy, maxNodos);
   if (!base) return null;
 
   const puntos: Celda[] = [{ x: ox, y: oy }, ...base];
@@ -163,7 +164,7 @@ export function buscarRutaA(
   ox: number,
   oy: number,
   esMeta: (x: number, y: number) => boolean,
-  maxNodos = 6000
+  maxNodos = Math.max(6000, mapa.ancho * mapa.alto)
 ): Celda[] | null {
   if (esMeta(ox, oy)) return [];
   const ancho = mapa.ancho;
